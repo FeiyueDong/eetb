@@ -253,14 +253,10 @@ ReadResult parse_text(std::string_view text, FormatId format, const TextParseOpt
         if (trim(line).empty())
             continue;
         const auto values = cells(line, delimiter);
-        if (!width) {
+        const bool first_row = width == 0;
+        if (first_row) {
             result.first_data_line = row + 1;
             width = values.size();
-            if (!options.layout && !options.time_column && selected.empty() &&
-                !delimited_table && width > 1) {
-                error(result.diagnostics, "text", "multiple values per row: choose Sequential or Columnar layout", row + 1);
-                return result;
-            }
             if (delimited_table && !options.first_line && !labels.empty() && labels.size() != width) {
                 error(result.diagnostics, "text", "column header width differs from data width", row + 1);
                 return result;
@@ -303,10 +299,17 @@ ReadResult parse_text(std::string_view text, FormatId format, const TextParseOpt
         for (std::size_t c = 0; c < values.size(); ++c) {
             const auto value = parse_number(values[c]);
             if (!value) {
-                error(result.diagnostics, "text", "expected a finite numeric value", row + 1, c + 1);
+                error(result.diagnostics, "text", first_row && !options.first_line
+                    ? "expected a finite numeric value. If the file has a header, set the first data line"
+                    : "expected a finite numeric value", row + 1, c + 1);
                 return result;
             }
             numbers.push_back(*value);
+        }
+        if (first_row && !options.layout && !options.time_column && selected.empty() &&
+            !delimited_table && width > 1) {
+            error(result.diagnostics, "text", "multiple values per row: choose Sequential or Columnar layout", row + 1);
+            return result;
         }
         if (options.time_column)
             time.rows.emplace_back(numbers[*options.time_column - 1], row + 1);

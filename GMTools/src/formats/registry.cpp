@@ -164,10 +164,10 @@ WriteResult write(const Trace& trace, const WriteOptions& options) {
 
     auto output_unit = options.output_unit;
     if (options.format == FormatId::At2) {
-        if (output_unit && output_unit != Unit::G) {
+        if (!trace.dt_seconds)
+            detail::error(result.diagnostics, "peer", "AT2 requires a known sampling interval (dt or fs)");
+        if (output_unit && output_unit != Unit::G)
             detail::error(result.diagnostics, "writer", "AT2 output uses g");
-            return result;
-        }
         output_unit = Unit::G;
     }
     if (!output_unit)
@@ -175,8 +175,9 @@ WriteResult write(const Trace& trace, const WriteOptions& options) {
     const auto factor = detail::acceleration_factor(trace.unit, *output_unit);
     if (trace.quantity != Quantity::Acceleration || !factor) {
         detail::error(result.diagnostics, "writer", "a known acceleration quantity and unit (g, m/s² or cm/s²) are required");
-        return result;
     }
+    if (has_errors(result.diagnostics))
+        return result;
     if (*output_unit == trace.unit)
         return entry->writer(trace, options.format);
 

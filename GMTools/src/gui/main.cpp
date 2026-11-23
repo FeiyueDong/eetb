@@ -45,6 +45,10 @@ QString real(double value) {
     return QString::number(value, 'g', 17);
 }
 
+QString displayed_number(double value) {
+    return QString::number(value, 'g', 12);
+}
+
 QString diagnostic_text(const Diagnostics& diagnostics) {
     QStringList messages;
     for (const auto& diagnostic : diagnostics)
@@ -64,7 +68,7 @@ QString trace_title(const Trace& trace, std::size_t channel) {
 }
 
 QString timing_unit(const Trace& trace) {
-    const auto dt = trace.dt_seconds ? real(*trace.dt_seconds) + QStringLiteral(" s")
+    const auto dt = trace.dt_seconds ? displayed_number(*trace.dt_seconds) + QStringLiteral(" s")
                                      : QStringLiteral("unknown");
     return QStringLiteral("%1 samples, dt %2, %3")
         .arg(trace.samples.size()).arg(dt).arg(as_text(name(trace.unit)));
@@ -567,10 +571,10 @@ private:
         text += QStringLiteral("\nQuantity: ") + as_text(name(trace.quantity));
         if (const auto span = trace.sample_span()) {
             text += QStringLiteral("\nFirst-to-last span: %1 s\nNominal record length: %2 s")
-                .arg(real(*span), real(*trace.record_length()));
+                .arg(displayed_number(*span), displayed_number(*trace.record_length()));
         }
         if (trace.relative_start_seconds)
-            text += QStringLiteral("\nRelative start: %1 s").arg(real(*trace.relative_start_seconds));
+            text += QStringLiteral("\nRelative start: %1 s").arg(displayed_number(*trace.relative_start_seconds));
         if (trace.start_time)
             text += QStringLiteral("\nAbsolute start: ") + as_text(timestamp(*trace.start_time));
         append_metadata(text, parsed_.data.attributes);

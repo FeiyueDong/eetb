@@ -87,7 +87,6 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
     std::optional<double> dt;
     Quantity quantity = Quantity::Unknown;
     Unit unit = Unit::Unknown;
-    std::size_t header_row{};
     std::size_t dt_row{};
     std::size_t npts_row{};
     std::string description;
@@ -109,10 +108,8 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
                 return result;
             }
         }
-        if (npts && dt) {
-            header_row = i + 1;
+        if (npts && dt)
             break;
-        }
         const auto words = lower(trim(line));
         if (acceleration_header(words)) {
             quantity = Quantity::Acceleration;
@@ -130,15 +127,14 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
         if (numeric_row(trim(line)))
             break;
     }
-    if (!npts || !dt) {
-        error(result.diagnostics, "peer", std::string{"missing PEER header field "} +
-            (!npts && !dt ? "NPTS and DT" : (!npts ? "NPTS" : "DT")));
+    if (!dt) {
+        error(result.diagnostics, "peer", "missing PEER header field DT");
         return result;
     }
 
     TextParseOptions numeric = options;
     if (!numeric.first_line)
-        numeric.first_line = header_row + 1;
+        numeric.first_line = std::max(npts_row, dt_row) + 1;
     numeric.layout = numeric.layout.value_or(Layout::Sequential);
     if (numeric.delimiter == Delimiter::Auto)
         numeric.delimiter = Delimiter::Whitespace;
@@ -151,7 +147,10 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
         return result;
     }
     auto& trace = result.data.traces.front();
-    if (trace.samples.size() != *npts)
+    if (!npts)
+        warn(result.diagnostics, "peer", "missing NPTS. Read " + std::to_string(trace.samples.size()) +
+             " samples from the data rows", dt_row);
+    else if (trace.samples.size() != *npts)
         warn(result.diagnostics, "peer", "NPTS declares " + std::to_string(*npts) +
              " samples; read " + std::to_string(trace.samples.size()), npts_row);
     if (trace.dt_seconds && std::abs(*trace.dt_seconds - *dt) > *dt * 1e-6)
@@ -160,7 +159,8 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
     trace.quantity = quantity;
     trace.unit = unit;
     trace.attributes["source.dt"] = "PEER header DT";
-    trace.attributes["peer.npts"] = std::to_string(*npts);
+    if (npts)
+        trace.attributes["peer.npts"] = std::to_string(*npts);
     if (quantity != Quantity::Unknown)
         trace.attributes["source.quantity"] = "PEER header";
     else
@@ -176,11 +176,6 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
 
 WriteResult write_peer(const Trace& trace, FormatId) {
     WriteResult result;
-    if (!trace.dt_seconds)
-        error(result.diagnostics, "peer", "AT2 requires a known sampling interval; specify dt or fs");
-    if (has_errors(result.diagnostics))
-        return result;
-
     std::string description = "Converted by GMTools";
     if (const auto desc = trace.attributes.find("peer.description"); desc != trace.attributes.end())
         description = desc->second;

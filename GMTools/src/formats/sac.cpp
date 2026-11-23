@@ -26,6 +26,10 @@ constexpr std::size_t even_word = 105;
 constexpr std::size_t channel_word = 150;
 constexpr int time_series = 1;
 constexpr int unknown_dependent = 5;
+constexpr int displacement_dependent = 6;
+constexpr int velocity_dependent = 7;
+constexpr int acceleration_dependent = 8;
+constexpr std::int64_t nanoseconds_per_millisecond = 1'000'000;
 
 struct LabelField {
     std::string_view key;
@@ -98,11 +102,43 @@ bool representable_label(std::string_view label, std::size_t width) {
 
 Quantity dependent_quantity(int dependent) {
     switch (dependent) {
-    case 6: return Quantity::Displacement;
-    case 7: return Quantity::Velocity;
-    case 8: return Quantity::Acceleration;
+    case displacement_dependent: return Quantity::Displacement;
+    case velocity_dependent: return Quantity::Velocity;
+    case acceleration_dependent: return Quantity::Acceleration;
     default: return Quantity::Unknown;
     }
+}
+
+int dependent_code(Quantity quantity) {
+    switch (quantity) {
+    case Quantity::Displacement: return displacement_dependent;
+    case Quantity::Velocity: return velocity_dependent;
+    case Quantity::Acceleration: return acceleration_dependent;
+    default: return unknown_dependent;
+    }
+}
+
+std::optional<std::int64_t> offset_nanoseconds(double seconds) {
+    const auto ticks = std::round(static_cast<long double>(seconds) * 1e9L);
+    const auto limit = std::ldexp(1.0L, 63);
+    if (!std::isfinite(ticks) || ticks < -limit || ticks >= limit)
+        return {};
+    return static_cast<std::int64_t>(ticks);
+}
+
+std::optional<std::chrono::sys_time<std::chrono::milliseconds>>
+sac_reference(TimePoint start, double begin) {
+    using namespace std::chrono;
+    const auto offset = offset_nanoseconds(begin);
+    const auto ticks = start.time_since_epoch().count();
+    if (!offset ||
+        (*offset > 0 && ticks < std::numeric_limits<std::int64_t>::min() + *offset) ||
+        (*offset < 0 && ticks > std::numeric_limits<std::int64_t>::max() + *offset))
+        return {};
+    const auto reference = ticks - *offset;
+    if (reference % nanoseconds_per_millisecond != 0)
+        return {};
+    return sys_time<milliseconds>{milliseconds{reference / nanoseconds_per_millisecond}};
 }
 
 std::optional<TimePoint> sac_start(std::span<const std::byte> bytes, bool little, double begin) {
@@ -118,20 +154,16 @@ std::optional<TimePoint> sac_start(std::span<const std::byte> bytes, bool little
         return {};
     const auto reference = sys_days{year{y}/January/1} + days{jday - 1} +
         hours{h} + minutes{m} + seconds{s} + milliseconds{ms};
-    constexpr auto per_ms = 1'000'000;
     const auto reference_ms = reference.time_since_epoch().count();
-    const auto begin_ns = std::round(static_cast<long double>(begin) * 1e9L);
-    const auto limit = std::ldexp(1.0L, 63);
-    if (reference_ms < std::numeric_limits<std::int64_t>::min() / per_ms ||
-        reference_ms > std::numeric_limits<std::int64_t>::max() / per_ms ||
-        begin_ns < -limit || begin_ns >= limit)
+    const auto offset = offset_nanoseconds(begin);
+    if (!offset || reference_ms < std::numeric_limits<std::int64_t>::min() / nanoseconds_per_millisecond ||
+        reference_ms > std::numeric_limits<std::int64_t>::max() / nanoseconds_per_millisecond)
         return {};
-    const auto reference_ns = reference_ms * per_ms;
-    const auto offset = static_cast<std::int64_t>(begin_ns);
-    if ((offset > 0 && reference_ns > std::numeric_limits<std::int64_t>::max() - offset) ||
-        (offset < 0 && reference_ns < std::numeric_limits<std::int64_t>::min() - offset))
+    const auto reference_ns = reference_ms * nanoseconds_per_millisecond;
+    if ((*offset > 0 && reference_ns > std::numeric_limits<std::int64_t>::max() - *offset) ||
+        (*offset < 0 && reference_ns < std::numeric_limits<std::int64_t>::min() - *offset))
         return {};
-    return TimePoint{nanoseconds{reference_ns + offset}};
+    return TimePoint{nanoseconds{reference_ns + *offset}};
 }
 
 } // namespace
@@ -255,11 +287,14 @@ WriteResult write_sac(const Trace& trace, FormatId) {
     double begin = trace.relative_start_seconds.value_or(0.0);
     std::optional<sys_time<milliseconds>> reference;
     if (trace.start_time) {
-        reference = time_point_cast<milliseconds>(*trace.start_time);
-        const auto residual = *trace.start_time - *reference;
-        begin = duration<double>(residual).count();
-        if (trace.relative_start_seconds && *trace.relative_start_seconds != begin)
-            warn(result.diagnostics, "sac", "relative origin adjusted to retain the absolute first-sample time");
+        if (trace.relative_start_seconds)
+            reference = sac_reference(*trace.start_time, begin);
+        if (!reference) {
+            reference = time_point_cast<milliseconds>(*trace.start_time);
+            begin = duration<double>(*trace.start_time - *reference).count();
+            if (trace.relative_start_seconds)
+                warn(result.diagnostics, "sac", "relative origin adjusted to retain the absolute first-sample time");
+        }
     }
     const auto dt = *trace.dt_seconds;
     const auto end = std::fma(static_cast<double>(trace.samples.size() - 1), dt, begin);
@@ -294,7 +329,7 @@ WriteResult write_sac(const Trace& trace, FormatId) {
     set_int(version_word, 7);
     set_int(npts_word, static_cast<std::int32_t>(trace.samples.size()));
     set_int(type_word, time_series);
-    set_int(dependent_word, unknown_dependent);
+    set_int(dependent_word, dependent_code(trace.quantity));
     set_int(even_word, 1);
     for (std::size_t word = 106; word <= 108; ++word)
         set_int(word, 0);
@@ -348,8 +383,10 @@ WriteResult write_sac(const Trace& trace, FormatId) {
 
     if (rounded)
         warn(result.diagnostics, "sac", "SAC waveform samples were rounded to float32");
-    if (trace.quantity != Quantity::Unknown || trace.unit != Unit::Unknown)
-        warn(result.diagnostics, "sac", "physical quantity and engineering unit are not written; sample magnitudes retain their original unit");
+    if (trace.unit != Unit::Unknown)
+        warn(result.diagnostics, "sac", "engineering unit is not encoded. Sample magnitudes retain their original scale");
+    if (trace.quantity == Quantity::Counts)
+        warn(result.diagnostics, "sac", "IDEP does not encode digital counts");
     if (retained_attributes < trace.attributes.size())
         warn(result.diagnostics, "sac", "some source attributes are not written");
     return result;

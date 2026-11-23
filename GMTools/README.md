@@ -19,17 +19,17 @@ miniSEED 是可选功能。安装带 CMake 配置的 libmseed 3.5.3 或兼容的
 
 | 格式 | 读取 | 写出 | 说明 |
 |---|---|---|---|
-| TXT / DAT | 是 | 是 | UTF-8/ASCII 数值文本。多个数值一行且布局不清楚时，需指定按行展开或按列分通道。 |
+| TXT / DAT | 是 | 是 | UTF-8/ASCII 数值文本。通用表头可通过指定首数据行跳过，多个数值一行且布局不清楚时需明确布局。 |
 | CSV / TSV | 是 | 是 | 默认按列分通道，可带简单列名。写出一列幅值和一个列名。 |
-| PEER NGA AT2 | 是 | 是 | 识别常见加速度头段及 `NPTS`、`DT`。写出需有明确的 dt 和加速度单位，并以 g 保存。样式参见 [PEER 报告附录](https://peer.berkeley.edu/sites/default/files/publications/2017_09_stewart_9.10.18.pdf)。 |
-| SAC Binary | 实验性 | 实验性 | 读取两种字节序的 v6/v7 等间隔 ITIME 记录。输出为小端 v7，时间头段有双精度 footer，波形为 float32。[SAC Binary 规范](https://ds.iris.edu/files/sac-manual/manual/file_format.html) |
-| miniSEED 2 / 3 | 实验性，可选 | 实验性，可选 | v2/v3 共用读取入口，当前允许 INT16、INT32、FLOAT32、FLOAT64、Steim-1、Steim-2 波形编码。输出使用 FLOAT64，`mseed` 写 v3，`mseed2` 写受标识和时间表示约束的 v2。[EarthScope libmseed](https://github.com/EarthScope/libmseed/tree/v3.5.3) |
+| PEER NGA AT2 | 是 | 是 | 识别常见加速度头段及 `NPTS`、`DT`。Helena 样本已通过 AT2↔CSV 回读。写出以 g 保存。样式参见 [PEER 报告附录](https://peer.berkeley.edu/sites/default/files/publications/2017_09_stewart_9.10.18.pdf)。 |
+| SAC Binary | 实验性 | 实验性 | 读取两种字节序的 v6/v7 等间隔 ITIME 记录。输出为小端 v7，时间头段有双精度 footer，波形为 float32。已核验小端 v6→v7。[SAC Binary 规范](https://ds.iris.edu/files/sac-manual/manual/file_format.html) |
+| miniSEED 2 / 3 | 实验性，可选 | 实验性，可选 | v2/v3 共用读取入口，当前允许 INT16、INT32、FLOAT32、FLOAT64、Steim-1、Steim-2 波形编码。输出使用 FLOAT64，`mseed` 写 v3，`mseed2` 写受标识和时间表示约束的 v2。已核验花莲的 v2 FLOAT32→v3 FLOAT64。[EarthScope libmseed](https://github.com/EarthScope/libmseed/tree/v3.5.3) |
 
 时间列以秒为单位，需要指定列号。解析会核查单调性和整条时间轴的等间隔性。只有一个样本时，时间列只能给出相对起点。普通 TXT、DAT、CSV 和 TSV 输出只保存幅值，采样信息、单位及专有元数据若无法保存，会给出提示。文本读取当前不支持复杂引号 CSV、GBK、Fortran `D` 指数或固定宽度布局。
 
-PEER 头段的 NPTS 与实际数量冲突时给出警告并保留实际样本。缺少或非法的 DT 会阻止 AT2 解析，可切换到通用文本并指定数据起始行来解释该文件。SAC 的 `IDEP` 可指示物理量，工程单位需要另行确认。`SCALE` 作为元数据保存，样本读入时保持原值。
+PEER 头段缺少 NPTS 或与实际数量冲突时给出警告并保留实际样本。缺少或非法的 DT 会阻止 AT2 解析，可切换到通用文本并指定数据起始行来解释该文件。SAC 的 `IDEP` 可读写加速度、速度和位移，工程单位需要另行确认。能同时表示时，SAC 导出保留相对起点 B 和绝对首样本时间。`SCALE` 作为元数据保存，样本读入时保持原值。
 
-miniSEED 以文件中的记录顺序处理。同一源标识在时间间隔、重叠、乱序或采样参数变化时拆成独立 Trace。仅在编码时间精度和采样间隔都允许时合并相邻片段，接受非零时间残差时会报告。样本值维持输入的数值，单位缺失时保留未知。输出需要已知绝对起始时刻、采样间隔和符合对应版本要求的 FDSN 源标识。对于带台网、台站和三字符分量的 SAC，也可以从这些字段组成标识。miniSEED 2 写出会核查编码后的采样间隔和时间戳。REST 的专有 miniSEED 变体尚未接入。
+miniSEED 以文件中的记录顺序处理。同一源标识在时间间隔、重叠、乱序或采样参数变化时拆成独立 Trace。仅在编码时间精度和采样间隔都允许时合并相邻片段，接受非零时间残差时会报告。样本值维持输入的数值，单位缺失时保留未知。输出需要已知绝对起始时刻、采样间隔和符合对应版本要求的 FDSN 源标识。对于带台网、台站和三字符分量的 SAC，也可以从这些字段组成标识。miniSEED 2 写出还会核查编码后的采样间隔和时间戳。花莲样本的两字符通道标签超出当前 v2 Writer 的源标识约束，可导出 v3。REST 的专有 miniSEED 变体尚未接入。
 
 ## CLI
 
@@ -47,6 +47,10 @@ miniSEED 以文件中的记录顺序处理。同一源标识在时间间隔、�
 # 将第 5 行起的多列连续样本解释为一条加速度记录
 ./build/gmtools convert record.txt --format text --first-line 5 --layout sequential \
   --dt 0.01 --input-unit cm/s2 --to at2 -o out/
+
+# Trinidad 样本的头段注明时间列使用秒、加速度列使用 g
+./build/gmtools convert example/Trinidad.dat --first-line 6 --layout columnar \
+  --time-column 1 --input-unit g --to csv -o out/
 
 # 显式指定输出单位，选择第二条通道
 ./build/gmtools convert channels.csv --channel 2 --input-unit g --output-unit m/s2 \
@@ -66,4 +70,4 @@ miniSEED 以文件中的记录顺序处理。同一源标识在时间间隔、�
 
 ## 验收状态
 
-已在 Linux 编译检查 CLI、Qt GUI 和启用 libmseed 3.5.3 的构建。真实样本读写回读、输出冲突、采样与单位对照、Windows 构建及 GUI 人工交互均待核验。[第一阶段开发与验收计划](docs/GMTOOLS_PHASE1_DEVELOPMENT.md)
+Linux 已完成四份真实样本验收、文本与 AT2 回读、输出冲突和单位验证，并在隔离的 X11 虚拟显示上核验 GUI 工作流。SAC 和 miniSEED 的验收范围按版本、字节序及编码单独记录，两者仍为实验性。Windows 验收待完成。[样本清单与 T0–T7 验收记录](docs/validation/GMTOOLS_PHASE1_RESULTS.md)
