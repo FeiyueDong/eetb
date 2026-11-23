@@ -1,7 +1,9 @@
 #include "../core/detail.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <set>
 
@@ -96,6 +98,22 @@ bool is_column_label(std::string_view cell) {
            !word.starts_with("nan(") && cell.find('"') == cell.npos;
 }
 
+std::optional<double> integer_sample(std::string_view cell) {
+    if (cell.starts_with('+')) {
+        cell.remove_prefix(1);
+        if (cell.starts_with('-'))
+            return {};
+    }
+    if (cell.empty())
+        return {};
+    std::int32_t value{};
+    const auto end = cell.data() + cell.size();
+    const auto parsed = std::from_chars(cell.data(), end, value);
+    if (parsed.ec != std::errc{} || parsed.ptr != end)
+        return {};
+    return static_cast<double>(value);
+}
+
 Delimiter delimiter_for(FormatId format, std::string_view first, Delimiter requested) {
     if (requested != Delimiter::Auto)
         return requested;
@@ -113,6 +131,46 @@ Delimiter delimiter_for(FormatId format, std::string_view first, Delimiter reque
             return Delimiter::Tab;
     }
     return Delimiter::Whitespace;
+}
+
+std::vector<std::string> table_labels(std::string_view line, Delimiter delimiter, std::size_t width) {
+    auto pieces = cells(line, delimiter);
+    if (pieces.size() != width && delimiter == Delimiter::Tab && line.find('\t') == line.npos)
+        pieces = cells(line, Delimiter::Whitespace);
+    std::vector<std::string> labels;
+    for (const auto piece : pieces) {
+        if (!labels.empty() && (piece.starts_with('(') || piece.starts_with('[')))
+            labels.back() += " " + std::string{piece};
+        else
+            labels.emplace_back(piece);
+    }
+    if (labels.size() != width || !std::ranges::all_of(labels, is_column_label))
+        labels.clear();
+    return labels;
+}
+
+struct LabelMeaning {
+    bool time_seconds{};
+    std::optional<Unit> acceleration_unit;
+};
+
+LabelMeaning meaning(std::string_view label) {
+    const auto lower_label = lower(label);
+    const std::string_view word{lower_label};
+    const auto open = word.find_first_of("[(");
+    if (open == word.npos || word.size() <= open + 2 ||
+        word.back() != (word[open] == '[' ? ']' : ')'))
+        return {};
+    const auto kind = trim(word.substr(0, open));
+    const auto unit = trim(word.substr(open + 1, word.size() - open - 2));
+    if ((kind == "time" || kind == "t") && unit == "s")
+        return {true, {}};
+    if (kind == "acceleration" || kind == "accel") {
+        const auto parsed = unit_from_name(unit);
+        if (parsed == Unit::G || parsed == Unit::Mps2 || parsed == Unit::Cmps2)
+            return {false, parsed};
+    }
+    return {};
 }
 
 struct TimeColumn {
@@ -180,6 +238,141 @@ std::optional<FormatId> detect_text_table(std::string_view text) {
     return {};
 }
 
+TextSuggestion suggest_text_options(std::string_view text, FormatId format, const ReadOptions& current) {
+    TextSuggestion result;
+    const auto source = lines(text);
+    const auto& set = current.text;
+    const auto last = set.last_line.value_or(source.size());
+    const auto requested_first = set.first_line.value_or(1);
+    if (requested_first == 0 || requested_first > last || last > source.size())
+        return result;
+
+    constexpr std::size_t max_header_lines = 24;
+    const auto search_end = set.first_line ? last : std::min(last, max_header_lines + 1);
+    std::size_t header_line{};
+    if (set.first_line) {
+        for (auto i = requested_first - 1; i > 0; --i) {
+            if (!trim(source[i - 1]).empty()) {
+                header_line = i;
+                break;
+            }
+        }
+    }
+    std::size_t first{};
+    std::size_t width{};
+    Delimiter delimiter{Delimiter::Auto};
+    for (std::size_t row = requested_first; row <= search_end; ++row) {
+        const auto line = trim(source[row - 1]);
+        if (line.empty())
+            continue;
+        delimiter = delimiter_for(format, source[row - 1], set.delimiter);
+        const auto values = cells(source[row - 1], delimiter);
+        if (std::ranges::all_of(values, [](auto token) { return parse_number(token).has_value(); })) {
+            first = row;
+            width = values.size();
+            break;
+        }
+        // A malformed numeric-looking row is not evidence of a text preamble.
+        const auto lead = line.front();
+        if (set.first_line || (lead >= '0' && lead <= '9') || lead == '+' || lead == '-' || lead == '.')
+            return result;
+        header_line = row;
+    }
+    if (!first)
+        return result;
+
+    const auto labels = header_line ? table_labels(source[header_line - 1], delimiter, width)
+                                    : std::vector<std::string>{};
+    std::vector<LabelMeaning> semantics;
+    std::vector<std::size_t> time_labels;
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+        semantics.push_back(meaning(labels[i]));
+        if (semantics.back().time_seconds)
+            time_labels.push_back(i + 1);
+    }
+    const bool columnar = set.layout != Layout::Sequential;
+    std::optional<std::size_t> candidate_time;
+    if (columnar && !set.time_column) {
+        if (time_labels.size() == 1 && width > 1 &&
+            std::ranges::find(set.data_columns, time_labels.front()) == set.data_columns.end()) {
+            candidate_time = time_labels.front();
+            result.evidence.push_back("Time column " + std::to_string(*candidate_time) + " from header " +
+                                      labels[*candidate_time - 1]);
+        } else if (!time_labels.empty()) {
+            for (const auto column : time_labels)
+                result.evidence.push_back("Candidate time column " + std::to_string(column) + " from header " +
+                                          labels[column - 1]);
+            warn(result.diagnostics, "suggestion", "time labels conflict with each other or the selected data columns",
+                 header_line);
+        }
+    }
+    if (semantics.empty() && std::none_of(source.begin() + static_cast<std::ptrdiff_t>(first),
+            source.begin() + static_cast<std::ptrdiff_t>(last), [](auto line) { return !trim(line).empty(); }))
+        return result;
+    if (!set.first_line && header_line)
+        result.evidence.push_back("First data line " + std::to_string(first) + " after the text preamble");
+
+    // Use the same reader to verify the entire proposed data block and time
+    // grid. Treat the shape used for validation as an internal choice when
+    // the column meanings are not stated by the source.
+    if (result.evidence.empty() && semantics.empty())
+        return result;
+    auto proposed = set;
+    proposed.first_line = first;
+    proposed.layout = set.layout.value_or(Layout::Columnar);
+    if (candidate_time)
+        proposed.time_column = candidate_time;
+    const auto verified = parse_text(text, format, proposed);
+    if (has_errors(verified.diagnostics)) {
+        for (const auto& diagnostic : verified.diagnostics)
+            warn(result.diagnostics, "suggestion", "candidate could not be verified: " + diagnostic.message,
+                 diagnostic.line, diagnostic.column);
+        return result;
+    }
+    if (!set.first_line && header_line)
+        result.options.text.first_line = first;
+    if (candidate_time && verified.data.traces.front().dt_seconds)
+        result.options.text.time_column = candidate_time;
+    else if (candidate_time)
+        warn(result.diagnostics, "suggestion", "at least two time values are needed to verify the time grid",
+             first, *candidate_time);
+
+    if (!columnar || semantics.empty())
+        return result;
+    const auto time_column = set.time_column ? set.time_column : result.options.text.time_column;
+    std::vector<std::size_t> selected = set.data_columns;
+    if (selected.empty()) {
+        for (std::size_t i = 1; i <= width; ++i) {
+            if (i != time_column)
+                selected.push_back(i);
+        }
+    }
+    const bool unresolved_time_labels = !time_labels.empty() &&
+        (!time_column || time_labels.size() != 1 || time_labels.front() != *time_column);
+    const auto shared_unit = selected.empty() ? std::nullopt : semantics[selected.front() - 1].acceleration_unit;
+    const bool uniform_units = shared_unit && std::ranges::all_of(selected, [&](auto index) {
+        return semantics[index - 1].acceleration_unit == shared_unit;
+    });
+    if (!current.overrides.unit && !uniform_units && std::ranges::any_of(selected, [&](auto index) {
+            return semantics[index - 1].acceleration_unit.has_value();
+        }))
+        warn(result.diagnostics, "suggestion", "selected data columns do not share one declared acceleration unit",
+             header_line);
+    if (!set.layout && !unresolved_time_labels && (result.options.text.time_column || uniform_units))
+        result.options.text.layout = Layout::Columnar;
+    if (uniform_units && !unresolved_time_labels &&
+        (!current.overrides.quantity || current.overrides.quantity == Quantity::Acceleration)) {
+        if (!current.overrides.unit) {
+            result.options.overrides.unit = shared_unit;
+            result.evidence.push_back("Input unit " + std::string{name(*shared_unit)} + " from acceleration column labels");
+        }
+        if (!current.overrides.quantity &&
+            (!current.overrides.unit || compatible(Quantity::Acceleration, *current.overrides.unit)))
+            result.options.overrides.quantity = Quantity::Acceleration;
+    }
+    return result;
+}
+
 ReadResult read_text(std::span<const std::byte> bytes, FormatId format, const TextParseOptions& options) {
     const auto text = text_view(bytes);
     if (text)
@@ -189,7 +382,8 @@ ReadResult read_text(std::span<const std::byte> bytes, FormatId format, const Te
     return result;
 }
 
-ReadResult parse_text(std::string_view text, FormatId format, const TextParseOptions& options) {
+ReadResult parse_text(std::string_view text, FormatId format, const TextParseOptions& options,
+                      TextSampleKind kind) {
     ReadResult result;
     result.data.source_format = format;
     const auto source_lines = lines(text);
@@ -297,11 +491,14 @@ ReadResult parse_text(std::string_view text, FormatId format, const TextParseOpt
         std::vector<double> numbers;
         numbers.reserve(values.size());
         for (std::size_t c = 0; c < values.size(); ++c) {
-            const auto value = parse_number(values[c]);
+            const auto value = kind == TextSampleKind::IntegerCounts ? integer_sample(values[c])
+                                                                     : parse_number(values[c]);
             if (!value) {
-                error(result.diagnostics, "text", first_row && !options.first_line
-                    ? "expected a finite numeric value. If the file has a header, set the first data line"
-                    : "expected a finite numeric value", row + 1, c + 1);
+                const auto message = kind == TextSampleKind::IntegerCounts ? "expected a signed integer count"
+                    : first_row && !options.first_line
+                        ? "expected a finite numeric value. If the file has a header, set the first data line"
+                        : "expected a finite numeric value";
+                error(result.diagnostics, "text", message, row + 1, c + 1);
                 return result;
             }
             numbers.push_back(*value);

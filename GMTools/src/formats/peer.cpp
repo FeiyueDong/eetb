@@ -111,6 +111,11 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
         if (npts && dt)
             break;
         const auto words = lower(trim(line));
+        if (words.starts_with("velocity time series") || words.starts_with("velocity time history") ||
+            words.starts_with("displacement time series") || words.starts_with("displacement time history")) {
+            error(result.diagnostics, "peer", "PEER velocity and displacement records are outside AT2 support", i + 1);
+            return result;
+        }
         if (acceleration_header(words)) {
             quantity = Quantity::Acceleration;
             if (const auto start = words.find("units of "); start != words.npos) {
@@ -133,8 +138,9 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
     }
 
     TextParseOptions numeric = options;
+    const auto declared_first_line = std::max(npts_row, dt_row) + 1;
     if (!numeric.first_line)
-        numeric.first_line = std::max(npts_row, dt_row) + 1;
+        numeric.first_line = declared_first_line;
     numeric.layout = numeric.layout.value_or(Layout::Sequential);
     if (numeric.delimiter == Delimiter::Auto)
         numeric.delimiter = Delimiter::Whitespace;
@@ -146,6 +152,12 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
         error(result.diagnostics, "peer", "an AT2 record must contain one trace; use Text for a channel matrix");
         return result;
     }
+    if ((options.first_line && options.first_line != declared_first_line) ||
+        (options.last_line && options.last_line != source_lines.size()) ||
+        (options.layout && options.layout != Layout::Sequential) ||
+        (options.delimiter != Delimiter::Auto && options.delimiter != Delimiter::Whitespace))
+        warn(result.diagnostics, "peer", "explicit text settings differ from the PEER data block. Check the selected range and layout",
+             declared_first_line);
     auto& trace = result.data.traces.front();
     if (!npts)
         warn(result.diagnostics, "peer", "missing NPTS. Read " + std::to_string(trace.samples.size()) +

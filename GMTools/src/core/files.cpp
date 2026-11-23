@@ -154,6 +154,38 @@ fs::path path_from_utf8(std::string_view value) {
     return fs::path(std::u8string{value.begin(), value.end()});
 }
 
+void detail::save_text_file(const fs::path& path, std::string_view text, bool overwrite,
+                            const fs::path& protected_input, Diagnostics& diagnostics) {
+    if (path.empty()) {
+        error(diagnostics, "output", "a profile path is required");
+        return;
+    }
+    if (!writable_target(path, protected_input, overwrite, diagnostics))
+        return;
+    StagingDirectory stage;
+    const auto parent = path.parent_path();
+    if (!make_stage(stage, parent.empty() ? fs::path{"."} : parent, diagnostics))
+        return;
+    const auto temporary = stage.path / "profile.json";
+    std::ofstream stream(temporary, std::ios::binary);
+    if (stream && text.size() <= static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
+        stream.write(text.data(), static_cast<std::streamsize>(text.size()));
+        stream.close();
+    } else {
+        stream.setstate(std::ios::failbit);
+    }
+    if (!stream) {
+        error(diagnostics, "output", path_to_utf8(path) + ": could not write the temporary profile");
+        return;
+    }
+    if (!writable_target(path, protected_input, overwrite, diagnostics))
+        return;
+    std::error_code ec;
+    publish(temporary, path, overwrite, ec);
+    if (ec)
+        error(diagnostics, "output", path_to_utf8(path) + ": " + ec.message());
+}
+
 std::string path_to_utf8(const fs::path& value) {
     const auto utf8 = value.generic_u8string();
     return {utf8.begin(), utf8.end()};

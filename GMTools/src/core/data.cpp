@@ -157,6 +157,8 @@ std::string timestamp(TimePoint time) {
 }
 
 Diagnostics apply_overrides(Trace& trace, const Overrides& user) {
+    if (trace.attributes.contains("knet.scale_factor_cmps2_per_count"))
+        return detail::validate_knet_overrides(trace, user);
     Diagnostics diagnostics;
     if (user.dt_seconds && user.fs_hz)
         detail::error(diagnostics, "override", "dt and fs are mutually exclusive");

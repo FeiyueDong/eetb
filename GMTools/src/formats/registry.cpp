@@ -30,6 +30,9 @@ constexpr std::array entries{
     Entry{{FormatId::Sac, "sac", ".sac", true, true,
            "experimental: binary v6/v7 evenly spaced ITIME read, v7 float32 write"},
            detail::read_sac, detail::write_sac, detail::detect_sac},
+    Entry{{FormatId::KnetAscii, "knet-ascii", "", true, false,
+           "experimental: single NIED ASCII component, integer counts calibrated by Scale Factor"},
+           detail::read_knet, nullptr, detail::detect_knet},
     Entry{{FormatId::At2, "at2", ".at2", true, true,
            "PEER AT2 ASCII/UTF-8 acceleration records; output uses g"},
            detail::read_peer, detail::write_peer, detail::detect_peer},
@@ -99,13 +102,32 @@ std::string_view name(FormatId format) {
     return entry ? entry->info.name : "auto";
 }
 
+bool is_generic_text(FormatId format) {
+    return format == FormatId::Text || format == FormatId::Dat ||
+           format == FormatId::Csv || format == FormatId::Tsv;
+}
+
+FormatId detect_input_format(std::span<const std::byte> bytes, std::string_view extension_hint) {
+    return bytes.empty() ? FormatId::Auto : detect_format(bytes, extension_hint);
+}
+
+TextSuggestion suggest_text(std::span<const std::byte> bytes, const ReadOptions& options) {
+    const auto format = options.format == FormatId::Auto ? detect_input_format(bytes, options.extension_hint)
+                                                        : options.format;
+    if (is_generic_text(format)) {
+        if (const auto text = text_view(bytes))
+            return detail::suggest_text_options(*text, format, options);
+    }
+    return {};
+}
+
 ReadResult read(std::span<const std::byte> bytes, const ReadOptions& options) {
     ReadResult result;
     if (bytes.empty()) {
         detail::error(result.diagnostics, "reader", "input file is empty");
         return result;
     }
-    const auto id = options.format == FormatId::Auto ? detect_format(bytes, options.extension_hint)
+    const auto id = options.format == FormatId::Auto ? detect_input_format(bytes, options.extension_hint)
                                                       : options.format;
     result.data.source_format = id;
     const auto entry = entry_for(id);

@@ -108,12 +108,6 @@ public:
         sampling_->setPlaceholderText(keep);
         sampling_kind_ = new QComboBox;
         sampling_kind_->addItems({QStringLiteral("dt (s)"), QStringLiteral("fs (Hz)")});
-        if (initial.fs_hz) {
-            sampling_kind_->setCurrentIndex(1);
-            sampling_->setText(real(*initial.fs_hz));
-        } else if (initial.dt_seconds) {
-            sampling_->setText(real(*initial.dt_seconds));
-        }
         auto* timing = new QHBoxLayout;
         timing->addWidget(sampling_kind_);
         timing->addWidget(sampling_);
@@ -124,17 +118,22 @@ public:
         for (const auto value : {Quantity::Unknown, Quantity::Acceleration, Quantity::Velocity,
                                  Quantity::Displacement, Quantity::Counts})
             quantity_->addItem(as_text(name(value)), static_cast<int>(value));
-        if (initial.quantity)
-            quantity_->setCurrentIndex(quantity_->findData(static_cast<int>(*initial.quantity)));
         form->addRow(QStringLiteral("Quantity"), quantity_);
 
         unit_ = new QComboBox;
         unit_->addItem(keep);
         for (const auto value : {Unit::Unknown, Unit::G, Unit::Mps2, Unit::Cmps2, Unit::Counts})
             unit_->addItem(as_text(name(value)), static_cast<int>(value));
-        if (initial.unit)
-            unit_->setCurrentIndex(unit_->findData(static_cast<int>(*initial.unit)));
         form->addRow(QStringLiteral("Input unit"), unit_);
+        set_options(initial);
+    }
+
+    void set_options(const Overrides& options) {
+        sampling_kind_->setCurrentIndex(options.fs_hz ? 1 : 0);
+        sampling_->setText(options.fs_hz ? real(*options.fs_hz)
+                          : options.dt_seconds ? real(*options.dt_seconds) : QString{});
+        quantity_->setCurrentIndex(options.quantity ? quantity_->findData(static_cast<int>(*options.quantity)) : 0);
+        unit_->setCurrentIndex(options.unit ? unit_->findData(static_cast<int>(*options.unit)) : 0);
     }
 
     Overrides options() const {
@@ -160,9 +159,11 @@ private:
 
 class ParseDialog final : public QDialog {
 public:
-    ParseDialog(std::span<const std::byte> bytes, std::string extension, const ReadOptions& original,
+    ParseDialog(std::span<const std::byte> bytes, std::filesystem::path input, const ReadOptions& original,
                 QWidget* parent)
-        : QDialog(parent), bytes_(bytes), extension_(std::move(extension)), raw_(text_view(bytes)) {
+        : QDialog(parent), bytes_(bytes), input_(std::move(input)),
+          extension_(path_to_utf8(input_.extension())), raw_(text_view(bytes)),
+          detected_(detect_input_format(bytes_, extension_)) {
         setWindowTitle(QStringLiteral("Interpret input file"));
         resize(850, 590);
         auto* outer = new QVBoxLayout(this);
@@ -193,14 +194,22 @@ public:
         delimiter_->addItems({QStringLiteral("Automatic"), QStringLiteral("Whitespace"), QStringLiteral("Comma"), QStringLiteral("Tab")});
         text_form->addRow(QStringLiteral("Delimiter"), delimiter_);
         columns_ = line_field(text_form, QStringLiteral("Data columns"), QStringLiteral("All except time, e.g. 2,3"));
-        time_ = line_field(text_form, QStringLiteral("Time column"), QStringLiteral("Optional; values in seconds"));
-        factor_ = line_field(text_form, QStringLiteral("Numeric factor"), QStringLiteral("Optional; scales sample values"));
+        time_ = line_field(text_form, QStringLiteral("Time column"), QStringLiteral("Values in seconds"));
+        factor_ = line_field(text_form, QStringLiteral("Numeric factor"), QStringLiteral("Optional sample multiplier"));
         load_text_options(original.text);
         settings->addWidget(text_group_);
 
         auto* override_group = new QGroupBox(QStringLiteral("Source parameter overrides"));
         overrides_ = std::make_unique<OverrideFields>(new QFormLayout(override_group), original.overrides);
         settings->addWidget(override_group);
+        profile_bar_ = new QWidget(parameters);
+        auto* profile_buttons = new QHBoxLayout(profile_bar_);
+        profile_buttons->setContentsMargins(0, 0, 0, 0);
+        auto* load = new QPushButton(QStringLiteral("Load profile…"), profile_bar_);
+        auto* save = new QPushButton(QStringLiteral("Save profile…"), profile_bar_);
+        profile_buttons->addWidget(load);
+        profile_buttons->addWidget(save);
+        settings->addWidget(profile_bar_);
         settings->addStretch();
 
         auto* preview = new QWidget(panes);
@@ -218,13 +227,19 @@ public:
 
         auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
         buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Use parsed traces"));
+        apply_suggestions_ = buttons->addButton(QStringLiteral("Apply text suggestions"), QDialogButtonBox::ActionRole);
         auto* check = buttons->addButton(QStringLiteral("Preview parse"), QDialogButtonBox::ActionRole);
         outer->addWidget(buttons);
+        connect(load, &QPushButton::clicked, this, [this] { choose_profile(); });
+        connect(save, &QPushButton::clicked, this, [this] { store_profile(); });
+        connect(apply_suggestions_, &QPushButton::clicked, this, [this] { apply_suggestions(); });
         connect(check, &QPushButton::clicked, this, [this] { preview_parse(false); });
         connect(buttons, &QDialogButtonBox::accepted, this, [this] { preview_parse(true); });
         connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
         connect(format_, &QComboBox::currentIndexChanged, this, [this] { update_text_fields(); });
         connect(layout_, &QComboBox::currentIndexChanged, this, [this] { update_text_fields(); });
+        connect(format_, &QComboBox::activated, this, [this] { format_explicit_ = true; });
+        connect(delimiter_, &QComboBox::activated, this, [this] { delimiter_explicit_ = true; });
         connect(first_, &QLineEdit::editingFinished, this, [this] {
             show_raw(parse_index(as_utf8(first_->text())).value_or(0));
         });
@@ -244,26 +259,33 @@ private:
     }
 
     void load_text_options(const TextParseOptions& options) {
-        if (options.first_line)
-            first_->setText(QString::number(*options.first_line));
-        if (options.last_line)
-            last_->setText(QString::number(*options.last_line));
-        if (options.layout)
-            layout_->setCurrentIndex(*options.layout == Layout::Sequential ? 1 : 2);
+        first_->setText(options.first_line ? QString::number(*options.first_line) : QString{});
+        last_->setText(options.last_line ? QString::number(*options.last_line) : QString{});
+        layout_->setCurrentIndex(options.layout ? (*options.layout == Layout::Sequential ? 1 : 2) : 0);
         delimiter_->setCurrentIndex(static_cast<int>(options.delimiter));
-        if (options.time_column)
-            time_->setText(QString::number(*options.time_column));
-        if (options.numeric_factor)
-            factor_->setText(real(*options.numeric_factor));
+        time_->setText(options.time_column ? QString::number(*options.time_column) : QString{});
+        factor_->setText(options.numeric_factor ? real(*options.numeric_factor) : QString{});
         QStringList columns;
         for (const auto column : options.data_columns)
             columns << QString::number(column);
         columns_->setText(columns.join(','));
     }
 
+    void load_options(const ReadOptions& options) {
+        format_->setCurrentIndex(format_->findData(static_cast<int>(options.format)));
+        load_text_options(options.text);
+        overrides_->set_options(options.overrides);
+        update_text_fields();
+    }
+
     void update_text_fields() {
-        const auto format = static_cast<FormatId>(format_->currentData().toInt());
-        text_group_->setEnabled(raw_.has_value() && format != FormatId::Sac && format != FormatId::Mseed);
+        auto format = static_cast<FormatId>(format_->currentData().toInt());
+        if (format == FormatId::Auto)
+            format = detected_;
+        const bool generic = raw_ && is_generic_text(format);
+        text_group_->setEnabled(raw_.has_value() && (generic || format == FormatId::At2));
+        profile_bar_->setVisible(generic);
+        apply_suggestions_->setVisible(generic);
         const bool columnar = layout_->currentIndex() != 1;
         columns_->setEnabled(columnar);
         time_->setEnabled(columnar);
@@ -290,6 +312,100 @@ private:
         }
         text.numeric_factor = optional_number(factor_, "Numeric factor must be finite");
         return result;
+    }
+
+    ReadOptions explicit_options() const {
+        auto active = options();
+        if (!loaded_profile_)
+            return active;
+        const auto& previous = *loaded_profile_;
+        const auto drop_inherited = [](auto& setting, const auto& saved) {
+            if (setting == saved)
+                setting = {};
+        };
+        if (!format_explicit_)
+            drop_inherited(active.format, previous.format);
+        if (!delimiter_explicit_)
+            drop_inherited(active.text.delimiter, previous.text.delimiter);
+        drop_inherited(active.text.first_line, previous.text.first_line);
+        drop_inherited(active.text.last_line, previous.text.last_line);
+        drop_inherited(active.text.layout, previous.text.layout);
+        drop_inherited(active.text.data_columns, previous.text.data_columns);
+        drop_inherited(active.text.time_column, previous.text.time_column);
+        drop_inherited(active.text.numeric_factor, previous.text.numeric_factor);
+        drop_inherited(active.overrides.dt_seconds, previous.overrides.dt_seconds);
+        drop_inherited(active.overrides.fs_hz, previous.overrides.fs_hz);
+        drop_inherited(active.overrides.quantity, previous.overrides.quantity);
+        drop_inherited(active.overrides.unit, previous.overrides.unit);
+        return active;
+    }
+
+    void choose_profile() {
+        const auto selected = QFileDialog::getOpenFileName(this, QStringLiteral("Load text profile"), {},
+                                                           QStringLiteral("JSON profiles (*.json);;All files (*)"));
+        if (selected.isEmpty())
+            return;
+        try {
+            auto profile = load_profile(path_from_utf8(as_utf8(selected)));
+            if (has_errors(profile.diagnostics)) {
+                feedback_->setPlainText(diagnostic_text(profile.diagnostics));
+                return;
+            }
+            auto merged = merge_profile(profile.options, explicit_options(), format_explicit_, delimiter_explicit_);
+            const auto& text = merged.options.text;
+            if (text.layout == Layout::Sequential && (text.time_column || !text.data_columns.empty())) {
+                feedback_->setPlainText(QStringLiteral("Profile column settings require Columnar layout."));
+                return;
+            }
+            loaded_profile_ = std::move(profile.options);
+            profile_diagnostics_ = std::move(merged.diagnostics);
+            load_options(merged.options);
+            preview_parse(false);
+        } catch (const std::exception& problem) {
+            feedback_->setPlainText(as_text(problem.what()));
+        }
+    }
+
+    void store_profile() {
+        QFileDialog dialog(this, QStringLiteral("Save text profile"));
+        dialog.setAcceptMode(QFileDialog::AcceptSave);
+        dialog.setNameFilter(QStringLiteral("JSON profiles (*.json)"));
+        dialog.setDefaultSuffix(QStringLiteral("json"));
+        dialog.setOption(QFileDialog::DontConfirmOverwrite);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        try {
+            const auto path = path_from_utf8(as_utf8(dialog.selectedFiles().front()));
+            const bool overwrite = std::filesystem::exists(path);
+            if (overwrite && QMessageBox::question(this, QStringLiteral("Replace profile"),
+                    QStringLiteral("Replace the existing file %1?").arg(as_text(path_to_utf8(path)))) != QMessageBox::Yes)
+                return;
+            const auto diagnostics = save_profile(path, options(), overwrite, input_);
+            if (has_errors(diagnostics))
+                feedback_->setPlainText(diagnostic_text(diagnostics));
+            else
+                feedback_->appendPlainText(QStringLiteral("Saved profile %1").arg(as_text(path_to_utf8(path))));
+        } catch (const std::exception& problem) {
+            feedback_->setPlainText(as_text(problem.what()));
+        }
+    }
+
+    static bool applicable(const TextSuggestion& suggestions) {
+        const auto& proposed = suggestions.options;
+        return proposed.text.first_line || proposed.text.layout || proposed.text.time_column ||
+               proposed.overrides.quantity || proposed.overrides.unit;
+    }
+
+    void apply_suggestions() {
+        try {
+            const auto active = options();
+            const auto suggestions = suggest_text(bytes_, active);
+            if (applicable(suggestions))
+                load_options(merge_profile(suggestions.options, active).options);
+            preview_parse(false);
+        } catch (const std::exception& problem) {
+            feedback_->setPlainText(as_text(problem.what()));
+        }
     }
 
     void show_raw(std::size_t highlight) {
@@ -345,6 +461,7 @@ private:
         try {
             used_ = options();
             result_ = read(bytes_, used_);
+            result_.diagnostics.insert(result_.diagnostics.begin(), profile_diagnostics_.begin(), profile_diagnostics_.end());
             auto description = diagnostic_text(result_.diagnostics);
             if (!has_errors(result_.diagnostics)) {
                 QString summary = QStringLiteral("%1 · %2 trace(s)")
@@ -355,8 +472,19 @@ private:
                 }
                 description = summary + (description.isEmpty() ? QString{} : '\n' + description);
             }
+            TextSuggestion suggestions;
+            if (!confirm && is_generic_text(result_.data.source_format)) {
+                auto active = used_;
+                active.format = result_.data.source_format;
+                suggestions = suggest_text(bytes_, active);
+            }
+            apply_suggestions_->setEnabled(applicable(suggestions));
+            for (const auto& evidence : suggestions.evidence)
+                description += QStringLiteral("\nSuggestion · ") + as_text(evidence);
+            if (!suggestions.diagnostics.empty())
+                description += '\n' + diagnostic_text(suggestions.diagnostics);
             feedback_->setPlainText(description);
-            show_raw(used_.text.first_line.value_or(result_.first_data_line));
+            show_raw(used_.text.first_line.value_or(suggestions.options.text.first_line.value_or(result_.first_data_line)));
             if (confirm && !has_errors(result_.diagnostics))
                 accept();
         } catch (const std::exception& problem) {
@@ -366,10 +494,16 @@ private:
     }
 
     std::span<const std::byte> bytes_;
+    std::filesystem::path input_;
     std::string extension_;
     std::optional<std::string_view> raw_;
+    FormatId detected_;
     ReadOptions used_;
     ReadResult result_;
+    std::optional<ReadOptions> loaded_profile_;
+    Diagnostics profile_diagnostics_;
+    bool format_explicit_{};
+    bool delimiter_explicit_{};
     QComboBox* format_{};
     QGroupBox* text_group_{};
     QComboBox* layout_{};
@@ -383,6 +517,8 @@ private:
     QLabel* raw_label_{};
     QPlainTextEdit* raw_view_{};
     QPlainTextEdit* feedback_{};
+    QWidget* profile_bar_{};
+    QPushButton* apply_suggestions_{};
 };
 
 class Window final : public QMainWindow {
@@ -474,7 +610,7 @@ public:
 private:
     void open_file() {
         const auto file = QFileDialog::getOpenFileName(this, QStringLiteral("Open ground motion"), {},
-            QStringLiteral("Waveforms (*.txt *.dat *.csv *.tsv *.at2 *.sac *.mseed *.miniseed);;All files (*)"));
+            QStringLiteral("Waveforms (*.txt *.dat *.csv *.tsv *.at2 *.sac *.mseed *.miniseed *.knet *.ns *.ew *.ud *.ns1 *.ew1 *.ud1 *.ns2 *.ew2 *.ud2);;All files (*)"));
         if (file.isEmpty())
             return;
         try {
@@ -484,7 +620,7 @@ private:
                 QMessageBox::warning(this, QStringLiteral("Cannot open file"), diagnostic_text(loaded.diagnostics));
                 return;
             }
-            ParseDialog dialog(loaded.bytes, path_to_utf8(path.extension()), {}, this);
+            ParseDialog dialog(loaded.bytes, path, {}, this);
             if (dialog.exec() == QDialog::Accepted) {
                 input_ = path;
                 bytes_ = std::move(loaded.bytes);
@@ -501,7 +637,7 @@ private:
                 QStringLiteral("Replace your channel edits by parsing the source again?")) != QMessageBox::Yes)
             return;
         try {
-            ParseDialog dialog(bytes_, path_to_utf8(input_.extension()), last_options_, this);
+            ParseDialog dialog(bytes_, input_, last_options_, this);
             if (dialog.exec() == QDialog::Accepted)
                 accept_parse(dialog);
         } catch (const std::exception& problem) {

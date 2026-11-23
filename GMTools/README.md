@@ -4,7 +4,7 @@ GMTools 将一个文件中的地震动记录读成独立通道。可以检查样
 
 ## 构建
 
-需要支持 C++20 的编译器和 CMake 3.20 或更新版本。构建 GUI 还需要 Qt 6.2 或更新版本的 Widgets 开发包。
+需要支持 C++20 的编译器、CMake 3.20 或更新版本，以及提供 CMake 配置的 nlohmann/json 3.10 或更新版本。构建 GUI 还需要 Qt 6.2 或更新版本的 Widgets 开发包。
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -22,6 +22,7 @@ miniSEED 是可选功能。安装带 CMake 配置的 libmseed 3.5.3 或兼容的
 | TXT / DAT | 是 | 是 | UTF-8/ASCII 数值文本。通用表头可通过指定首数据行跳过，多个数值一行且布局不清楚时需明确布局。 |
 | CSV / TSV | 是 | 是 | 默认按列分通道，可带简单列名。写出一列幅值和一个列名。 |
 | PEER NGA AT2 | 是 | 是 | 识别常见加速度头段及 `NPTS`、`DT`。Helena 样本已通过 AT2↔CSV 回读。写出以 g 保存。样式参见 [PEER 报告附录](https://peer.berkeley.edu/sites/default/files/publications/2017_09_stewart_9.10.18.pdf)。 |
+| NIED K-NET / KiK-net ASCII | 实验性 | — | 单文件单分量，通过头段辨认格式，按 Scale Factor 把有符号整数 counts 标定为 cm/s²。正式样本验收待完成。[NIED ASCII 格式](https://www.kyoshin.bosai.go.jp/en/knetascii/) |
 | SAC Binary | 实验性 | 实验性 | 读取两种字节序的 v6/v7 等间隔 ITIME 记录。输出为小端 v7，时间头段有双精度 footer，波形为 float32。已核验小端 v6→v7。[SAC Binary 规范](https://ds.iris.edu/files/sac-manual/manual/file_format.html) |
 | miniSEED 2 / 3 | 实验性，可选 | 实验性，可选 | v2/v3 共用读取入口，当前允许 INT16、INT32、FLOAT32、FLOAT64、Steim-1、Steim-2 波形编码。输出使用 FLOAT64，`mseed` 写 v3，`mseed2` 写受标识和时间表示约束的 v2。已核验花莲的 v2 FLOAT32→v3 FLOAT64。[EarthScope libmseed](https://github.com/EarthScope/libmseed/tree/v3.5.3) |
 
@@ -30,6 +31,8 @@ miniSEED 是可选功能。安装带 CMake 配置的 libmseed 3.5.3 或兼容的
 PEER 头段缺少 NPTS 或与实际数量冲突时给出警告并保留实际样本。缺少或非法的 DT 会阻止 AT2 解析，可切换到通用文本并指定数据起始行来解释该文件。SAC 的 `IDEP` 可读写加速度、速度和位移，工程单位需要另行确认。能同时表示时，SAC 导出保留相对起点 B 和绝对首样本时间。`SCALE` 作为元数据保存，样本读入时保持原值。
 
 miniSEED 以文件中的记录顺序处理。同一源标识在时间间隔、重叠、乱序或采样参数变化时拆成独立 Trace。仅在编码时间精度和采样间隔都允许时合并相邻片段，接受非零时间残差时会报告。样本值维持输入的数值，单位缺失时保留未知。输出需要已知绝对起始时刻、采样间隔和符合对应版本要求的 FDSN 源标识。对于带台网、台站和三字符分量的 SAC，也可以从这些字段组成标识。miniSEED 2 写出还会核查编码后的采样间隔和时间戳。花莲样本的两字符通道标签超出当前 v2 Writer 的源标识约束，可导出 v3。REST 的专有 miniSEED 变体尚未接入。
+
+K-NET ASCII 读取从 `Memo.` 后按行展开 count，以头段 `Sampling Freq(Hz)` 确定 dt。首样本为 JST 触发时刻 `Record Time` 减 15 秒并转换为 UTC。通道编号、原始方向与仪器系数记入元数据。CSV 默认保持标定后的 cm/s²，AT2 再换算为 g。显式 `--numeric-factor` 在仪器标定后单独应用。冲突的输入单位或采样设置在标准模式下报错。
 
 ## CLI
 
@@ -52,6 +55,12 @@ miniSEED 以文件中的记录顺序处理。同一源标识在时间间隔、�
 ./build/gmtools convert example/Trinidad.dat --first-line 6 --layout columnar \
   --time-column 1 --input-unit g --to csv -o out/
 
+# 复用 Trinidad 的文本解释参数
+./build/gmtools info example/Trinidad.dat --profile example/trinidad.profile.json
+
+# 将单路 NIED ASCII 波形按头段标定后写为 AT2
+./build/gmtools convert /path/to/station.NS --format knet-ascii --to at2 -o out/
+
 # 显式指定输出单位，选择第二条通道
 ./build/gmtools convert channels.csv --channel 2 --input-unit g --output-unit m/s2 \
   --to txt -o selected.txt
@@ -61,13 +70,30 @@ miniSEED 以文件中的记录顺序处理。同一源标识在时间间隔、�
 
 默认导出全部通道，文件名使用输入文件名和安全的通道名称或序号。`-o` 指定目录，单通道时也可指定与目标格式匹配的完整文件名。使用 `--overwrite` 才会允许替换已有输出。程序先核对目标路径，再暂存所有编码结果。若发布阶段发生文件系统错误，命令返回非零并列出已写出的文件，可据此处理部分发布。
 
+## 文本解析配置
+
+`--profile FILE` 可供 `info` 和 `convert` 使用。GUI 的普通文本导入窗口也可以载入或保存同一份 JSON。[Trinidad Profile 示例](example/trinidad.profile.json)
+
+| JSON 字段 | 允许值 |
+|---|---|
+| `schema_version` | 必填，整数 `1`。 |
+| `format` | `auto`、`text`、`dat`、`csv` 或 `tsv`。省略时自动检测。 |
+| `text` | 可包含 `first_line`、`last_line`、`layout`、`delimiter`、`data_columns`、`time_column`、`numeric_factor`。布局为 `sequential` 或 `columnar`。分隔符为 `auto`、`whitespace`、`comma` 或 `tab`。列号从 1 开始，数据列用整数数组保存。 |
+| `overrides` | 可包含 `dt`、`fs`、`quantity`、`unit`。`dt` 和 `fs` 互斥，量和单位沿用 CLI 的选项。 |
+
+本次显式填写的值优先于 Profile。例如显式 `--fs` 替换 Profile 的 `dt`，与 Profile 不同的值会产生提示。读取标准文件时仍执行该格式的头段和标定校验。未知字段、重复键、非法值和未知版本会报错。Profile 只保存输入解释参数。
+
+诸如 `Time[s]`、`Time (s)` 和 `Accel[g]` 的明确标签可用来提出导入建议。程序先核对完整数据区和时间网格。CLI 将建议写到标准错误，GUI 可通过 **Apply text suggestions** 应用。建议需要显式采用，多个候选时间列或不同列的加速度单位冲突时由用户选择。
+
 ## GUI
 
 1. 打开一个文件。解析窗口支持自动识别或手动选格式。
-2. 对照编号原文检查数据起始行、布局、列号、时间列和采样间隔。用 **Preview parse** 查看通道数、样本数、单位和诊断。
+2. 对照编号原文检查数据起始行、布局、列号、时间列和采样间隔。通用文本可以选择 **Apply text suggestions**、**Load profile** 或 **Save profile**。用 **Preview parse** 查看通道数、样本数、单位和诊断。
 3. 确认后在主窗口查看全部通道。时间戳和相对起点在通道信息区显示。波形横轴在已知 dt 时显示首样本起的经过时间，其他情况显示样本序号。
 4. 可编辑当前通道的名称、采样信息及单位。勾选要写出的通道，选择目标格式和输出目录。导出结果会列出文件和诊断。
 
 ## 验收状态
 
 Linux 已完成四份真实样本验收、文本与 AT2 回读、输出冲突和单位验证，并在隔离的 X11 虚拟显示上核验 GUI 工作流。SAC 和 miniSEED 的验收范围按版本、字节序及编码单独记录，两者仍为实验性。Windows 验收待完成。[样本清单与 T0–T7 验收记录](docs/validation/GMTOOLS_PHASE1_RESULTS.md)
+
+第二阶段加入文本建议、Profile 与实验性 NIED ASCII 读取。正式波形样本、运行回归和界面操作待验收。PEER VT2/DT2、COSMOS 和 USGS SMC 的调查范围见[第二阶段样本与开发记录](docs/validation/GMTOOLS_PHASE2_RESULTS.md)。

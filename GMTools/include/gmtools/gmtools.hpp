@@ -12,7 +12,7 @@
 
 namespace gmtools {
 
-enum class FormatId { Auto, Text, Dat, Csv, Tsv, At2, Sac, Mseed, Mseed2 };
+enum class FormatId { Auto, Text, Dat, Csv, Tsv, At2, Sac, Mseed, Mseed2, KnetAscii };
 enum class Quantity { Unknown, Acceleration, Velocity, Displacement, Counts };
 enum class Unit { Unknown, G, Mps2, Cmps2, Counts };
 enum class Severity { Warning, Error };
@@ -76,6 +76,17 @@ struct ReadOptions {
     std::string extension_hint;
 };
 
+struct ProfileResult {
+    ReadOptions options;
+    Diagnostics diagnostics;
+};
+
+struct TextSuggestion {
+    ReadOptions options; // Candidate inputs only. The caller chooses whether to apply them.
+    std::vector<std::string> evidence;
+    Diagnostics diagnostics;
+};
+
 struct ReadResult {
     FileData data;
     Diagnostics diagnostics;
@@ -123,6 +134,10 @@ std::optional<FormatId> format_from_name(std::string_view name);
 std::string_view name(FormatId format);
 std::string_view name(Quantity quantity);
 std::string_view name(Unit unit);
+std::string_view name(Layout layout);
+std::string_view name(Delimiter delimiter);
+std::optional<Layout> layout_from_name(std::string_view value);
+std::optional<Delimiter> delimiter_from_name(std::string_view value);
 std::optional<Quantity> quantity_from_name(std::string_view value);
 std::optional<Unit> unit_from_name(std::string_view value);
 std::optional<double> parse_number(std::string_view word);
@@ -134,6 +149,14 @@ std::string timestamp(TimePoint time);
 
 InputFile load_file(const std::filesystem::path& path);
 std::optional<std::string_view> text_view(std::span<const std::byte> bytes);
+bool is_generic_text(FormatId format);
+FormatId detect_input_format(std::span<const std::byte> bytes, std::string_view extension_hint = {});
+TextSuggestion suggest_text(std::span<const std::byte> bytes, const ReadOptions& options = {});
+ProfileResult load_profile(const std::filesystem::path& path);
+Diagnostics save_profile(const std::filesystem::path& path, const ReadOptions& options,
+                         bool overwrite = false, const std::filesystem::path& protected_input = {});
+ProfileResult merge_profile(const ReadOptions& profile, const ReadOptions& explicit_options,
+                            bool explicit_format = false, bool explicit_delimiter = false);
 ReadResult read(std::span<const std::byte> bytes, const ReadOptions& options = {});
 Diagnostics apply_overrides(Trace& trace, const Overrides& overrides);
 WriteResult write(const Trace& trace, const WriteOptions& options);

@@ -26,7 +26,8 @@ void usage(std::ostream& out) {
            "  gmtools convert INPUT --to FORMAT -o PATH [read options] [--channel N] [--output-unit UNIT] [--overwrite]\n"
            "Run gmtools formats for available targets, including the optional miniSEED 2 target.\n"
            "Read options:\n"
-           "  --format auto|text|dat|csv|tsv|at2|sac|mseed\n"
+           "  --format auto|text|dat|csv|tsv|at2|knet-ascii|sac|mseed\n"
+           "  --profile FILE  apply a text JSON profile before explicit command options\n"
            "  --layout sequential|columnar  --delimiter auto|whitespace|comma|tab\n"
            "  --first-line N  --last-line N  --data-columns N[,N...]  --time-column N\n"
            "  --dt SECONDS | --fs HZ  --input-unit g|m/s2|cm/s2|counts|unknown\n"
@@ -36,8 +37,11 @@ void usage(std::ostream& out) {
 
 struct Command {
     std::filesystem::path input;
+    std::optional<std::filesystem::path> profile;
     ReadOptions read;
     ExportOptions output;
+    bool explicit_format{};
+    bool explicit_delimiter{};
 };
 
 template<class T>
@@ -45,14 +49,6 @@ T require(std::optional<T> value, std::string_view option, std::string_view expe
     if (!value)
         throw std::invalid_argument(std::string{option} + " requires " + std::string{expected});
     return *value;
-}
-
-Delimiter parse_delimiter(std::string_view value) {
-    if (value == "auto") return Delimiter::Auto;
-    if (value == "whitespace") return Delimiter::Whitespace;
-    if (value == "comma") return Delimiter::Comma;
-    if (value == "tab") return Delimiter::Tab;
-    throw std::invalid_argument("--delimiter requires auto, whitespace, comma or tab");
 }
 
 Command parse(const Args& args, bool convert) {
@@ -87,19 +83,19 @@ Command parse(const Args& args, bool convert) {
         auto& text = read.text;
         if (option == "--format")
             read.format = require(format_from_name(value), option, "a known input format");
+        else if (option == "--profile") {
+            if (value.empty())
+                throw std::invalid_argument("--profile requires a file path");
+            command.profile = path_from_utf8(value);
+        }
         else if (option == "--first-line")
             text.first_line = require(parse_index(value), option, "a positive line number");
         else if (option == "--last-line")
             text.last_line = require(parse_index(value), option, "a positive line number");
-        else if (option == "--layout") {
-            if (value == "sequential")
-                text.layout = Layout::Sequential;
-            else if (value == "columnar")
-                text.layout = Layout::Columnar;
-            else
-                throw std::invalid_argument("--layout requires sequential or columnar");
-        } else if (option == "--delimiter")
-            text.delimiter = parse_delimiter(value);
+        else if (option == "--layout")
+            text.layout = require(layout_from_name(value), option, "sequential or columnar");
+        else if (option == "--delimiter")
+            text.delimiter = require(delimiter_from_name(value), option, "auto, whitespace, comma or tab");
         else if (option == "--data-columns")
             text.data_columns = require(parse_indices(value), option, "comma-separated positive column numbers");
         else if (option == "--time-column")
@@ -133,6 +129,8 @@ Command parse(const Args& args, bool convert) {
         throw std::invalid_argument("an input file is required");
     if (convert && (command.output.writer.format == FormatId::Auto || command.output.output.empty()))
         throw std::invalid_argument("convert requires --to FORMAT and --output PATH");
+    command.explicit_format = seen.contains("--format");
+    command.explicit_delimiter = seen.contains("--delimiter");
     command.read.extension_hint = path_to_utf8(command.input.extension());
     return command;
 }
@@ -140,6 +138,23 @@ Command parse(const Args& args, bool convert) {
 void print_diagnostics(const Diagnostics& diagnostics, const std::filesystem::path& file) {
     for (const auto& diagnostic : diagnostics)
         std::cerr << path_to_utf8(file) << ": " << describe(diagnostic) << '\n';
+}
+
+void print_suggestions(const TextSuggestion& suggestion, const std::filesystem::path& input) {
+    for (const auto& evidence : suggestion.evidence)
+        std::cerr << path_to_utf8(input) << ": suggestion: " << evidence << '\n';
+    print_diagnostics(suggestion.diagnostics, input);
+    const auto& options = suggestion.options;
+    if (!options.text.first_line && !options.text.layout && !options.text.time_column &&
+        !options.overrides.unit && !options.overrides.quantity)
+        return;
+    std::cerr << "Suggested input options";
+    if (options.text.first_line) std::cerr << " --first-line " << *options.text.first_line;
+    if (options.text.layout) std::cerr << " --layout " << name(*options.text.layout);
+    if (options.text.time_column) std::cerr << " --time-column " << *options.text.time_column;
+    if (options.overrides.quantity) std::cerr << " --quantity " << name(*options.overrides.quantity);
+    if (options.overrides.unit) std::cerr << " --input-unit " << name(*options.overrides.unit);
+    std::cerr << '\n';
 }
 
 void print_attributes(const Metadata& attributes, std::string_view indent) {
@@ -193,7 +208,16 @@ int run(const Args& args) {
         return 2;
     }
 
-    const auto command = parse(args, action == "convert");
+    auto command = parse(args, action == "convert");
+    if (command.profile) {
+        const auto profile = load_profile(*command.profile);
+        print_diagnostics(profile.diagnostics, *command.profile);
+        if (has_errors(profile.diagnostics))
+            return 1;
+        auto merged = merge_profile(profile.options, command.read, command.explicit_format, command.explicit_delimiter);
+        print_diagnostics(merged.diagnostics, *command.profile);
+        command.read = std::move(merged.options);
+    }
     const auto input = load_file(command.input);
     if (has_errors(input.diagnostics)) {
         for (const auto& diagnostic : input.diagnostics)
@@ -202,6 +226,11 @@ int run(const Args& args) {
     }
     const auto parsed = read(input.bytes, command.read);
     print_diagnostics(parsed.diagnostics, command.input);
+    if (is_generic_text(parsed.data.source_format)) {
+        auto suggested_read = command.read;
+        suggested_read.format = parsed.data.source_format;
+        print_suggestions(suggest_text(input.bytes, suggested_read), command.input);
+    }
     if (has_errors(parsed.diagnostics))
         return 1;
     if (action == "info") {
