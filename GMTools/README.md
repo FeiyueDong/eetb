@@ -4,7 +4,7 @@ GMTools 将一个文件中的地震动记录读成独立通道。可以检查样
 
 ## 构建
 
-需要支持 C++20 的编译器、CMake 3.20 或更新版本，以及提供 CMake 配置的 nlohmann/json 3.10 或更新版本。构建 GUI 还需要 Qt 6.2 或更新版本的 Widgets 开发包。
+需要支持 C++20 的编译器、CMake 3.20 或更新版本，以及提供 CMake 配置的 nlohmann/json 3.10 或更新版本。构建 GUI 还需要 Qt 6.2 或更新版本的 Widgets 和 Concurrent 开发包。
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -81,19 +81,26 @@ K-NET ASCII 读取从 `Memo.` 后按行展开 count，以头段 `Sampling Freq(H
 | `text` | 可包含 `first_line`、`last_line`、`layout`、`delimiter`、`data_columns`、`time_column`、`numeric_factor`。布局为 `sequential` 或 `columnar`。分隔符为 `auto`、`whitespace`、`comma` 或 `tab`。列号从 1 开始，数据列用整数数组保存。 |
 | `overrides` | 可包含 `dt`、`fs`、`quantity`、`unit`。`dt` 和 `fs` 互斥，量和单位沿用 CLI 的选项。 |
 
-本次显式填写的值优先于 Profile。例如显式 `--fs` 替换 Profile 的 `dt`，与 Profile 不同的值会产生提示。读取标准文件时仍执行该格式的头段和标定校验。未知字段、重复键、非法值和未知版本会报错。Profile 只保存输入解释参数。
+CLI 显式填写的值优先于 Profile。例如显式 `--fs` 替换 Profile 的 `dt`，与 Profile 不同的值会产生提示。GUI 的 **Load profile** 完整替换当前表单，包括清空配置中未设置的字段；加载后可以继续手动调整。读取标准文件时仍执行该格式的头段和标定校验。未知字段、重复键、非法值和未知版本会报错。Profile 只保存输入解释参数。
 
 诸如 `Time[s]`、`Time (s)` 和 `Accel[g]` 的明确标签可用来提出导入建议。程序先核对完整数据区和时间网格。CLI 将建议写到标准错误，GUI 可通过 **Apply text suggestions** 应用。建议需要显式采用，多个候选时间列或不同列的加速度单位冲突时由用户选择。
 
 ## GUI
 
-1. 打开一个文件。解析窗口支持自动识别或手动选格式。
-2. 对照编号原文检查数据起始行、布局、列号、时间列和采样间隔。通用文本可以选择 **Apply text suggestions**、**Load profile** 或 **Save profile**。用 **Preview parse** 查看通道数、样本数、单位和诊断。
-3. 确认后在主窗口查看全部通道。时间戳和相对起点在通道信息区显示。波形横轴在已知 dt 时显示首样本起的经过时间，其他情况显示样本序号。
-4. 可编辑当前通道的名称、采样信息及单位。勾选要写出的通道，选择目标格式和输出目录。导出结果会列出文件和诊断。
+1. 点击 **Open file**、按 `Ctrl+O` 或拖入单个文件。解析窗口支持自动识别或手动选格式。
+2. 对照编号原文检查数据起始行、布局、列号、时间列和采样间隔。通用文本可以选择 **Apply text suggestions**、**Load profile** 或 **Save profile**。用 **Preview parse** 查看通道数、样本数、单位和诊断，再点击 **Import channels**。修改表单后，旧预览会失效；参数未变化时直接复用成功的预览结果。
+3. 左侧列出全部通道，点击通道可定位并高亮对应波形，勾选决定导出范围。右侧 **Summary / Metadata / Diagnostics** 分别展示参数、来源字段及导入诊断。波形横轴在已知 dt 时显示首样本起的经过时间，其他情况显示样本序号。大记录使用保留极值的概览包络绘图，导出仍使用完整样本。
+4. 使用 **Edit channel parameters** 编辑名称、采样信息及输入单位。输入单位用于解释现有数值，导出区的输出单位才执行数值换算。K-NET 的额外 **Numeric factor** 在仪器标定后应用；标准格式的单位和采样约束仍由核心检查。
+5. 在 **Export** 中选择目标格式、输出单位和目录，点击导出按钮或按 `Ctrl+Shift+E`。按钮显示勾选数量，未选通道时禁用。格式说明提前展示采样和元数据限制，结果窗口列出实际文件与诊断，并可打开输出目录。
+
+读取、解析、波形概览计算与导出在后台执行；执行期间显示忙碌指示，禁止替换记录、编辑及关闭正在工作的窗口。打开新文件或重新解释文件时会重置覆盖开关，有未全部导出的通道编辑时会提示。窗口尺寸、面板比例及最近使用目录保存在本机 Qt 设置中。界面按启动时的系统配色选择浅色或深色主题。
+
+模块职责、此次整理的问题及人工检查项目见[架构与界面整理记录](docs/ARCHITECTURE_AND_UI_REVIEW.md)。
 
 ## 验收状态
 
-Linux 已完成四份真实样本验收、文本与 AT2 回读、输出冲突和单位验证，并在隔离的 X11 虚拟显示上核验 GUI 工作流。SAC 和 miniSEED 的验收范围按版本、字节序及编码单独记录，两者仍为实验性。Windows 验收待完成。[样本清单与 T0–T7 验收记录](docs/validation/GMTOOLS_PHASE1_RESULTS.md)
+第一阶段在 Linux 完成了四份真实样本验收、文本与 AT2 回读、输出冲突和单位验证，并在隔离的 X11 虚拟显示上核验了当时的 GUI 工作流。SAC 和 miniSEED 的验收范围按版本、字节序及编码单独记录，两者仍为实验性。Windows 验收待完成。[样本清单与 T0–T7 验收记录](docs/validation/GMTOOLS_PHASE1_RESULTS.md)
 
 第二阶段加入文本建议、Profile 与实验性 NIED ASCII 读取。正式波形样本、运行回归和界面操作待验收。PEER VT2/DT2、COSMOS 和 USGS SMC 的调查范围见[第二阶段样本与开发记录](docs/validation/GMTOOLS_PHASE2_RESULTS.md)。
+
+本次架构与界面整理只做静态检查和 Linux 构建，未运行测试、启动 GUI 或执行视觉验收。历史验收记录不代表新界面的运行验证。

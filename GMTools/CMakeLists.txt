@@ -39,8 +39,15 @@ endif()
 install(TARGETS gmtools RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(GMTOOLS_BUILD_GUI)
-    find_package(Qt6 6.2 REQUIRED COMPONENTS Widgets)
-    add_executable(gmtools_gui WIN32 src/gui/main.cpp src/gui/plot.cpp)
-    target_link_libraries(gmtools_gui PRIVATE gmtools_core Qt6::Widgets)
+    find_package(Qt6 6.2 REQUIRED COMPONENTS Widgets Concurrent)
+    add_executable(gmtools_gui WIN32
+        src/gui/main.cpp
+        src/gui/main_window.cpp
+        src/gui/parse_dialog.cpp
+        src/gui/plot.cpp
+        src/gui/theme.cpp
+        src/gui/ui_helpers.cpp
+    )
+    target_link_libraries(gmtools_gui PRIVATE gmtools_core Qt6::Widgets Qt6::Concurrent)
     install(TARGETS gmtools_gui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
