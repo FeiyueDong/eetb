@@ -132,16 +132,16 @@ CLI 使用示意：
 
 ```bash
 # 仍然保留手动参数，不依赖 Profile
-./build/gmtools info example/Trinidad.dat \
+xmake run gmtools info example/Trinidad.dat \
   --first-line 6 --layout columnar --time-column 1 --input-unit g
 
 # 新增 Profile 复用（具体配置文件由用户保存）
-./build/gmtools info example/Trinidad.dat --profile ./profiles/trinidad.json
-./build/gmtools convert example/Trinidad.dat --profile ./profiles/trinidad.json \
+xmake run gmtools info example/Trinidad.dat --profile ./profiles/trinidad.json
+xmake run gmtools convert example/Trinidad.dat --profile ./profiles/trinidad.json \
   --to csv -o ./build/output/
 
 # 显式参数优先于 Profile，对冲突给出必要诊断
-./build/gmtools info example/Trinidad.dat --profile ./profiles/trinidad.json \
+xmake run gmtools info example/Trinidad.dat --profile ./profiles/trinidad.json \
   --input-unit cm/s2
 ```
 
@@ -211,8 +211,8 @@ NIED 官方给出的原始样本是 `counts`，头段 Scale Factor 可表示为�
 CLI 使用示意（最终格式名由实现确认）：
 
 ```bash
-./build/gmtools info /path/to/station.NS --format knet-ascii
-./build/gmtools convert /path/to/station.NS --format knet-ascii \
+xmake run gmtools info /path/to/station.NS --format knet-ascii
+xmake run gmtools convert /path/to/station.NS --format knet-ascii \
   --to at2 -o ./build/output/
 # 由于已按官方 Scale Factor 转换为 cm/s²，AT2 Writer 再转换为 g。
 ```

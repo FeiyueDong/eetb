@@ -1,5 +1,7 @@
 # GMTools 第一阶段验收记录
 
+> 构建入口已迁移至 xmake。本文保留当时的 CMake 选项、命令和产物路径作为历史记录；当前操作请使用 [README 的构建说明](../../README.md#构建)。
+
 验收日期为 2026-11-24（北京时间）。代码基线为 `main` 的 `d73045c`，结果对应本轮修复后的工作树。Linux x86_64 使用 GCC 16.2.1、CMake 4.5.1、Qt Widgets 6.12.0 和 libmseed 3.5.3，构建选项为 `GMTOOLS_BUILD_GUI=ON`、`GMTOOLS_ENABLE_MSEED=ON`。独立参考路径使用 Python 的文本和二进制解析、ObsPy 1.5.2、EarthScope `mseedview`。
 
 另验证了关闭 GUI 和 miniSEED 的纯 CLI 构建。该构建仍识别 miniSEED 签名，`info` 明确提示当前构建缺少适配器。

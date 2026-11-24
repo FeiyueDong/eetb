@@ -4,16 +4,41 @@ GMTools 将一个文件中的地震动记录读成独立通道。可以检查样
 
 ## 构建
 
-需要支持 C++20 的编译器、CMake 3.20 或更新版本，以及提供 CMake 配置的 nlohmann/json 3.10 或更新版本。构建 GUI 还需要 Qt 6.2 或更新版本的 Widgets 和 Concurrent 开发包。
+需要支持 C++20 的编译器和 xmake 3.0 或更新版本。nlohmann/json 3.10 或更新的 3.x 版本由 xmake 查找或安装。构建 GUI 还需要已安装的 Qt 6.2 或更新的 6.x SDK，包含 Widgets 和 Concurrent 模块。
+
+在 `GMTools/` 目录执行：
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+xmake f -m release
+xmake build -j 4
 ```
 
-生成 `gmtools` 和 `gmtools_gui`。使用 `-DGMTOOLS_BUILD_GUI=OFF` 可以仅构建 CLI。命令示例采用单配置构建器的输出路径。Visual Studio 等多配置构建器通常将产物放入 `build/Release/`。
+默认构建 `gmtools` 和 `gmtools_gui`，二者共用内部静态库 `gmtools_core`。产物位于 `build/<平台>/<架构>/<模式>/`，例如 Linux Release 的 `build/linux/x86_64/release/`。使用 `xmake run gmtools ...` 或 `xmake run gmtools_gui` 可以免去手动拼接路径；这两个目标的运行目录为 `GMTools/`，以下样例中的相对输入与输出路径均以此为基准。
 
-miniSEED 是可选功能。安装带 CMake 配置的 libmseed 3.5.3 或兼容的 3.x 版本，然后在配置时添加 `-DGMTOOLS_ENABLE_MSEED=ON`。如依赖安装在非系统路径，同时添加 `-DCMAKE_PREFIX_PATH=/path/to/libmseed`。分发包含 libmseed 的程序时需附带依赖的 Apache 2.0 许可及适用声明。[EarthScope libmseed](https://github.com/EarthScope/libmseed/tree/v3.5.3)
+常用配置：
+
+```sh
+# 只构建 CLI，不查找 Qt
+xmake f -m release --build_gui=n --enable_mseed=n
+xmake build -j 4
+
+# 启用 GUI；自动检测不合适时指定 Qt SDK
+xmake f -m release --build_gui=y --qt=/path/to/Qt/6.x/gcc_64
+xmake build -j 4
+
+# 启用 miniSEED，使用与当前编译器、架构及运行库匹配的 libmseed 安装目录
+xmake f -m release --enable_mseed=y --mseed_sdk=/path/to/libmseed
+xmake build -j 4
+
+# 安装应用到指定目录；gmtools_core 不作为公共 SDK 安装
+xmake install -o /path/to/install
+```
+
+`--build_gui` 默认 `y`，`--enable_mseed` 默认 `n`；xmake 会记住上次配置，切换时应显式设置开关。Debug 使用 `-m debug`。Windows/MSVC 的 Qt 路径应指向对应的 MSVC SDK；MinGW 使用 `xmake f -p mingw --mingw=/path/to/mingw --qt=/path/to/Qt/mingw_64`，不要混用两套编译器的依赖。MSVC 各目标统一使用 MD/MDd 运行库，CLI 保留 Unicode 入口。
+
+miniSEED 需要 libmseed 3.5.3 或更新的 3.x 版本。`--mseed_sdk` 下应有 `include/libmseed.h` 和 `lib/`（或 `lib64/`）中的 mseed 库；显式路径无效时直接报错。不指定该选项时，通过 pkg-config 的 `mseed.pc` 查找，可用 `PKG_CONFIG_PATH` 指向安装目录。关闭 miniSEED 时不查找该依赖。分发包含 libmseed 的程序时需附带依赖的 Apache 2.0 许可及适用声明。[EarthScope libmseed](https://github.com/EarthScope/libmseed/tree/v3.5.3)
+
+当前构建入口为 [`xmake.lua`](xmake.lua)，不再维护 CMake 配置；`docs/validation/` 和架构整理记录中的旧命令属于对应版本的历史证据。旧 `build/` 下的 CMake 产物不会自动删除。
 
 ## 格式与限制
 
@@ -38,31 +63,31 @@ K-NET ASCII 读取从 `Memo.` 后按行展开 count，以头段 `Sampling Freq(H
 
 ```sh
 # 查看当前构建提供的格式及读写能力
-./build/gmtools formats
+xmake run gmtools formats
 
 # 查看 AT2 的采样信息、单位、通道和诊断
-./build/gmtools info record.at2
+xmake run gmtools info record.at2
 
 # 从时间 + 两个通道的 CSV 分别导出两个文件
-./build/gmtools convert record.csv --time-column 1 --data-columns 2,3 \
+xmake run gmtools convert record.csv --time-column 1 --data-columns 2,3 \
   --to csv -o out/
 
 # 将第 5 行起的多列连续样本解释为一条加速度记录
-./build/gmtools convert record.txt --format text --first-line 5 --layout sequential \
+xmake run gmtools convert record.txt --format text --first-line 5 --layout sequential \
   --dt 0.01 --input-unit cm/s2 --to at2 -o out/
 
 # Trinidad 样本的头段注明时间列使用秒、加速度列使用 g
-./build/gmtools convert example/Trinidad.dat --first-line 6 --layout columnar \
+xmake run gmtools convert example/Trinidad.dat --first-line 6 --layout columnar \
   --time-column 1 --input-unit g --to csv -o out/
 
 # 复用 Trinidad 的文本解释参数
-./build/gmtools info example/Trinidad.dat --profile example/trinidad.profile.json
+xmake run gmtools info example/Trinidad.dat --profile example/trinidad.profile.json
 
 # 将单路 NIED ASCII 波形按头段标定后写为 AT2
-./build/gmtools convert /path/to/station.NS --format knet-ascii --to at2 -o out/
+xmake run gmtools convert /path/to/station.NS --format knet-ascii --to at2 -o out/
 
 # 显式指定输出单位，选择第二条通道
-./build/gmtools convert channels.csv --channel 2 --input-unit g --output-unit m/s2 \
+xmake run gmtools convert channels.csv --channel 2 --input-unit g --output-unit m/s2 \
   --to txt -o selected.txt
 ```
 
