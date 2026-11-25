@@ -6,10 +6,10 @@ GMTools 将一个文件中的地震动记录读成独立通道。可以检查样
 
 需要支持 C++20 的编译器和 xmake 3.0 或更新版本。nlohmann/json 3.10 或更新的 3.x 版本由 xmake 查找或安装。构建 GUI 还需要已安装的 Qt 6.2 或更新的 6.x SDK，包含 Widgets 和 Concurrent 模块。
 
-在 `GMTools/` 目录执行：
+完整构建包含 CLI、Qt GUI 和标准 miniSEED。安装匹配的 Qt SDK、libmseed 并确保可找到 `mseed.pc` 后，在 `GMTools/` 目录执行：
 
 ```sh
-xmake f -m release
+xmake f -m release --build_gui=y --enable_mseed=y
 xmake build -j 4
 ```
 
@@ -22,8 +22,8 @@ xmake build -j 4
 xmake f -m release --build_gui=n --enable_mseed=n
 xmake build -j 4
 
-# 启用 GUI；自动检测不合适时指定 Qt SDK
-xmake f -m release --build_gui=y --qt=/path/to/Qt/6.x/gcc_64
+# 只使用 Qt SDK 的 GUI 配置
+xmake f -m release --build_gui=y --enable_mseed=n --qt=/path/to/Qt/6.x/gcc_64
 xmake build -j 4
 
 # 启用 miniSEED，使用与当前编译器、架构及运行库匹配的 libmseed 安装目录
@@ -48,10 +48,12 @@ miniSEED 需要 libmseed 3.5.3 或更新的 3.x 版本。`--mseed_sdk` 下应有
 | CSV / TSV | 是 | 是 | 默认按列分通道，可带简单列名。默认写一列幅值和一个列名。可选经过时间列、元信息表头和有效数字。 |
 | PEER NGA AT2 | 是 | 是 | 识别常见加速度头段及 `NPTS`、`DT`。Helena 样本已通过 AT2↔CSV 回读。写出以 g 保存。样式参见 [PEER 报告附录](https://peer.berkeley.edu/sites/default/files/publications/2017_09_stewart_9.10.18.pdf)。 |
 | PEER VT2 / DT2 | 是 | 是 | 按头段识别速度、位移，分别导出为 cm/s、cm。已用 Tabas 速度实录和 Northridge 位移实录逐点核对。 |
-| Modified miniSEED | 实验性 | — | 专用 wc/wt/ws 包头和 Steim-2 读取，可选择原始 counts 或文件灵敏度标定。独立于 libmseed 开关。 |
+| Modified miniSEED | 实验性 | — | 专用 wc/wt/ws 包头和 Steim-2 读取，可选择原始 counts 或文件灵敏度标定。武汉 wc 实录已核验，wt/ws 设备实录待验收。两种构建配置均包含此 Reader。 |
 | NIED K-NET / KiK-net ASCII | 实验性 | — | 单文件单分量，通过头段辨认格式，按 Scale Factor 把有符号整数 counts 标定为 cm/s²。正式样本验收待完成。[NIED ASCII 格式](https://www.kyoshin.bosai.go.jp/en/knetascii/) |
 | SAC Binary | 实验性 | 实验性 | 读取两种字节序的 v6/v7 等间隔 ITIME 记录。输出为小端 v6/v7，默认 v7 含双精度 footer，两者的波形均为 float32。[SAC Binary 规范](https://ds.iris.edu/files/sac-manual/manual/file_format.html) |
 | miniSEED 2 / 3 | 实验性，可选 | 实验性，可选 | v2/v3 共用读取入口，当前允许 INT16、INT32、FLOAT32、FLOAT64、Steim-1、Steim-2 波形编码。可写 FLOAT64（默认）、FLOAT32、INT32 或 Steim-2，`mseed` 写 v3，`mseed2` 写受标识和时间表示约束的 v2。[EarthScope libmseed](https://github.com/EarthScope/libmseed/tree/v3.5.3) |
+
+第三阶段核验了台湾台站小端 SAC v6 原件、小端 v6/v7 写出和独立生成的大端 v6 输入。标准 miniSEED 核验了花莲 v2 FLOAT32 实录、libmseed 的六种 v2 编码参考文件，以及 v2/v3 各四种输出编码。[分项验收记录](docs/validation/GMTOOLS_PHASE3_RESULTS.md)
 
 时间列以秒为单位，需要指定列号。解析会核查单调性和整条时间轴的等间隔性。只有一个样本时，时间列只能给出相对起点。通用文本支持 Fortran `D/d` 指数。复杂引号 CSV、GBK 与固定宽度字段超出当前解析范围。
 
@@ -109,6 +111,8 @@ xmake run gmtools convert channels.csv --channel 2 --input-unit g --output-unit 
 
 Modified miniSEED 默认输出原始计数。`--calibration source` 使用扩展低 30 位的灵敏度，按 `counts × 100 / sensitivity` 得到对应 SI 单位；无量纲辅助通道保留 counts 并提示。零灵敏度阻止文件标定。已知 counts 可用 `--calibration manual --calibration-factor 0.025 --calibration-unit cm/s2` 手动标定。普通数值文本需要先用 `--input-unit counts` 确认输入。对所有格式，`--numeric-factor` 都在本次解析的标定之后执行一次，再按需换算输出单位。K-NET 固定应用文件 Scale Factor。
 
+Modified Reader 以片段首样本和累计点数预测下一包起点。头段条件一致、起点偏差在 `min(100 µs, dt/16)` 内时合并，所有样本保持原顺序。每个片段的绝对偏差按最近整数纳秒记录，半纳秒向上取整。首次达到 1 ns 时提示通道及包序号，随后只更新 `modified.max_start_residual_ns`。完全连续或舍入为零时省略该字段。超容差或时间未知时另起片段。
+
 `--start-time` 接受带 `Z` 的 UTC 时间，可精确到纳秒。`--relative-start` 为独立的秒数。完整 `--source-id` 和分项 `--network --station --location --channel-code` 二选一；已知空位置可写为 `--location ''`，恢复未知位置可用 `--clear-location`。多通道文件修改标识时要指定 `--channel N`。指定通道后，仅对该通道应用输入覆盖、标定和缩放。显示名称用于列表与默认文件名。跨格式写出使用通道标识，显式编辑优先于原始 SAC、miniSEED 字段。
 
 ## 按目标格式导出
@@ -132,6 +136,24 @@ xmake run gmtools convert example/RSN1_HELENA.A_A-HMC180.AT2 \
 - **自描述文本**第一行为 `# GMTools waveform 1`，第二行为以 `# ` 开头的一行 JSON，第三行为列名，第四行起为数据。头段保存实际输出单位、量、名称、点数、可用的 dt、UTC、相对起点和标识。回读校验点数与时间网格；经过时间的零点和源相对起点独立。普通文本继续使用原有 Profile。
 - **SAC** 默认 v7，可用 `--sac-version 6` 写出 v6。v6 时间舍入超过 1/16 个采样间隔会报错。默认 `--sac-unit-mode keep` 保留工程尺度，仅对已知纳米制写匹配的 IDEP；旧版会对其他工程尺度也写入物理量 IDEP。依赖传统 SAC IDEP 解释的软件应使用 `standard`，由 GMTools 换算并设置 IDEP。台站、事件坐标、方向和可表达的标识随记录传递。
 - **标准 miniSEED** 使用 `--mseed-encoding float64|float32|int32|steim2`。浮点缩窄会提示舍入，整数编码要求每点精确可表示为 int32，Steim-2 还要求差分可编码。缺 UTC、缺标识或目标版本无法保持时间网格时拒绝导出。该输出不携带工程单位。
+
+### 自描述文本的数值来源
+
+v1 的可选 `provenance` 对象用 `original_quantity` 和 `original_unit` 保存已知的处理前标签，`steps` 按执行顺序保存标定、调幅和导出换算。例如，武汉 EIN 从 counts 经文件标定、两倍调幅并以 cm/s² 写出后，头段中的主字段为 `quantity="acceleration"`、`unit="cm/s²"`，对应的来源对象如下。
+
+```json
+{
+  "original_quantity": "counts",
+  "original_unit": "counts",
+  "steps": [
+    {"type": "calibration", "source": "Modified miniSEED", "factor": 0.00002, "unit": "m/s²"},
+    {"type": "scale", "factor": 2},
+    {"type": "unit_conversion", "from": "m/s²", "to": "cm/s²"}
+  ]
+}
+```
+
+标定步的 `factor` 以所列物理单位每 count 表示，调幅步的 `factor` 为实际乘数。回读时从文件直接取样本和当前单位，`gmtools info` 和 GUI 的 **Metadata** 可查看 `history.*`。再次显式调幅或换算会追加步骤。缺少来源对象的旧 v1 文件照常读入。读取时跳过未知扩展字段和步骤类型，已知字段的单位、乘数或结构无效时会报错。格式专有头段和未应用的候选灵敏度不随该对象导出。
 
 ## 文本解析配置
 
@@ -167,3 +189,18 @@ CLI 显式填写的值优先于 Profile。例如显式 `--fs` 替换 Profile 的
 第二阶段加入文本建议、Profile 与实验性 NIED ASCII 读取。正式波形样本、运行回归和界面操作待验收。PEER VT2/DT2、COSMOS 和 USGS SMC 的调查范围见[第二阶段样本与开发记录](docs/validation/GMTOOLS_PHASE2_RESULTS.md)。
 
 第三阶段的运行证据、样本来源与待验收范围见[第三阶段验收记录](docs/validation/GMTOOLS_PHASE3_RESULTS.md)。实施范围见[第三阶段开发文档](docs/GMTOOLS_PHASE3_DEVELOPMENT.md)。
+
+### 本地复核
+
+使用 Python 3.9+ 和已构建的 CLI。输出目录须为新目录，每次运行请更换名称。
+
+```sh
+python3 scripts/verify_core_formats.py --gmtools build/linux/x86_64/release/gmtools \
+  --examples example --output build/phase3-closeout/check-01
+```
+
+脚本用标准库独立读取 Helena、Trinidad 和 SAC，并核对 v1 兼容性与数值历史。安装可选的 ObsPy 后可比对花莲记录。追加 `--modified "/path/to/WH.XY001-2024-01-01-15-15-00.mseed"` 可核查武汉样本的哈希与分段时间，安装 ObsPy 后还可独立解压比对标定值。每项分别报告 `PASS`、`FAIL` 或 `SKIPPED`。断言失败返回非零，CLI 输出保存在新目录的 `commands.log`。本次收尾的执行状态单独记录。[核验脚本](scripts/verify_core_formats.py) · [验收状态](docs/validation/GMTOOLS_PHASE3_RESULTS.md#收尾修复)
+
+### 示例数据来源
+
+`example/` 中的四份波形由用户提供，首次入库于 `ce14599`。Helena 头段署名 PEER NGA，Trinidad 头段署名 PEER Strong Motion Database。台湾 SAC 的头段标识为 TW.5AFCD.00.HNZ，花莲 miniSEED 为 CB.TAPBA 的 28 个通道，这两份文件的提供机构待确认。仓库中未找到四份原件的下载日期、原始下载链接或再分发授权。对外分发前应由数据提供者确认授权范围。武汉与 PEER VT2/DT2 外部样本按本地提供的文件复核。Modified 解码器移植自 REST data，其 MIT 许可适用于相应代码。[示例摘要与哈希](docs/validation/GMTOOLS_PHASE1_RESULTS.md#样本清单) · [外部样本和代码版本](docs/validation/GMTOOLS_PHASE3_RESULTS.md#可复核的样本与数值) · [REST data 许可](licenses/REST-data-MIT.txt)

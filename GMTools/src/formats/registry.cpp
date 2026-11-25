@@ -17,7 +17,7 @@ struct Entry {
 
 constexpr std::array entries{
     Entry{{FormatId::ModifiedMseed, "modified-mseed", "", true, false,
-           "experimental: wc/wt/ws Steim-2 counts and optional file sensitivity"},
+           "experimental: wc Steim-2 checked on recorded data; wt/ws device samples pending; optional calibration"},
           detail::read_modified,
           nullptr,
           detail::detect_modified},
@@ -52,11 +52,11 @@ constexpr std::array entries{
           detail::read_peer,
           detail::write_peer,
           nullptr},
-    Entry{{FormatId::Vt2, "vt2", ".vt2", true, true, "experimental: PEER velocity; output cm/s"},
+    Entry{{FormatId::Vt2, "vt2", ".vt2", true, true, "PEER velocity; Tabas VT2 checked, output cm/s"},
           detail::read_peer,
           detail::write_peer,
           nullptr},
-    Entry{{FormatId::Dt2, "dt2", ".dt2", true, true, "PEER displacement; output cm"},
+    Entry{{FormatId::Dt2, "dt2", ".dt2", true, true, "PEER displacement; Alhambra DT2 checked, output cm"},
           detail::read_peer,
           detail::write_peer,
           nullptr},
@@ -283,6 +283,8 @@ WriteResult write(const Trace& trace, const WriteOptions& options) {
         return entry->writer(trace, options);
 
     Trace converted = trace;
+    if (options.text_header == TextHeader::Metadata)
+        converted.attributes["output.converted_from"] = name(trace.unit);
     converted.unit = *output_unit;
     for (std::size_t i = 0; i < converted.samples.size(); ++i) {
         const auto original = converted.samples[i];

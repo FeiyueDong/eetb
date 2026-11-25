@@ -466,12 +466,22 @@ void MainWindow::show_trace(bool scroll) {
                                      {"modified.segment", "Segment"},
                                      {"mseed.segment", "Segment"},
                                      {"channel.source_id", "Source ID"},
-                                     {"calibration.source", "Calibration"},
+                                     {"calibration.source", "Calibration on import"},
+                                     {"history.calibration.source", "Earlier calibration"},
+                                     {"history.last_numeric_factor", "Earlier scaling (last)"},
+                                     {"text.numeric_factor", "Scaling on import"},
                                      {"calibration.factor", "Units per count"}})
         if (trace.attributes.contains(key))
             property(label, as_text(trace.attributes.at(key)));
-    if (trace.attributes.contains("modified.sensitivity") && !trace.attributes.contains("calibration.applied_unit"))
-        property("Calibration", "Raw counts");
+    if (trace.attributes.contains("history.calibration.factor"))
+        property("Earlier factor", as_text(trace.attributes.at("history.calibration.factor") + " " +
+                                           trace.attributes.at("history.calibration.unit") + "/count"));
+    if (trace.unit == Unit::Counts || trace.quantity == Quantity::Counts) {
+        if (trace.attributes.contains("text.numeric_factor") || trace.attributes.contains("history.last_numeric_factor"))
+            property("Values", "Scaled counts");
+        else if (trace.attributes.contains("modified.sensitivity"))
+            property("Values", "Raw counts");
+    }
     QString metadata;
     if (!parsed_->data.attributes.empty()) {
         metadata = QStringLiteral("FILE FIELDS");
@@ -521,7 +531,7 @@ void MainWindow::update_format() {
     format_options_->setVisible(!peer);
     if (is_generic_text(format))
         format_help_->setText(writer_.text_header == TextHeader::Metadata
-                                  ? "Waveform metadata will be retained."
+                                  ? "Stores basic waveform metadata and supported processing history."
                                   : "Choose a metadata header to retain timing, units and channel identifiers.");
     else if (peer)
         format_help_->setText("Requires a sampling interval and compatible physical units.");

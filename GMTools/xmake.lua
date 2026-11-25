@@ -81,7 +81,7 @@ target("gmtools_core")
     add_includedirs("include", {public = true})
     add_packages("nlohmann_json")
     add_files("src/core/data.cpp", "src/core/metadata.cpp", "src/core/files.cpp", "src/core/profile.cpp",
-              "src/formats/registry.cpp", "src/formats/text.cpp", "src/formats/peer.cpp",
+              "src/formats/registry.cpp", "src/formats/text.cpp", "src/formats/text_provenance.cpp", "src/formats/peer.cpp",
               "src/formats/modified_mseed.cpp", "src/formats/knet.cpp", "src/formats/sac.cpp")
     if has_config("enable_mseed") then
         add_files("src/formats/mseed.cpp")

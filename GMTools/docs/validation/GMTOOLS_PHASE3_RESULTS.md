@@ -1,6 +1,6 @@
 # GMTools 第三阶段验收记录
 
-2026-11-25，Linux x86_64。结果对应基线 `cce2069245bbeb6d31de53baf163f870ab8d8242` 上的工作树。第三阶段开发文档与用户提供的附件逐字节一致。[开发范围及完成定义](../GMTOOLS_PHASE3_DEVELOPMENT.md)
+2026-11-25，Linux x86_64。下列 T1–T10 结果对应基线 `cce2069245bbeb6d31de53baf163f870ab8d8242` 上的工作树，第三阶段实现随后收录于 `f2acf0d3be7011d77ea857bd4e8708215ba17685`。第三阶段开发文档与当时用户提供的附件逐字节一致。[开发范围及完成定义](../GMTOOLS_PHASE3_DEVELOPMENT.md)
 
 ## 构建与入口
 
@@ -60,3 +60,39 @@ GM=build/xmake-mseed/linux/x86_64/release/gmtools
 - **NOT RUN**：Modified 的 wt、ws 实录。本轮真实覆盖来自 wc。小端 Steim-2 通过将 EarthScope 小端测试载荷装入派生 Modified 包头核对，不能替代相应设备的原始记录。
 - **NOT RUN**：Windows/MSVC 构建、真实桌面的 DPI 与主题组合、所有目标格式在 GUI 上的逐项人工操作。SAC 和 miniSEED 的各编码选项主要经共用 Core 与 CLI 核验。
 - **BLOCKED**：NIED 正式台网样本仍缺可用授权文件。现有 K-NET 夹具支持基本回归；正式样本用于进一步确认实际产品差异。
+
+## 收尾修复
+
+2026-11-25，以 `main` 的 `f2acf0d` 为基线。以下记录对应收尾后的工作树。[收尾开发文档](../GMTOOLS_PHASE3_CLOSEOUT.md)
+
+| 范围 | 本轮状态 | 交付与证据 |
+|---|---|---|
+| F1 自描述文本 | IMPLEMENTED | v1 头段可选的 `provenance.steps` 记录实际标定、调幅、导出换算。写出换算时只修改临时 Trace。回读将步骤映射到 `history.*`，由主字段解释现存样本。CLI 的 `info` 和 GUI 的 Metadata 展示历史，Summary 区分本次标定、既往标定及调幅后的 counts。 |
+| F2 Modified 时间 | IMPLEMENTED | 以整数微秒求实际起点时间差，按采样率和片段累计点数求期望时间差。在原合并容差内按最近整数纳秒累计最大绝对偏差，半纳秒向上取整。每段至多一次容差提示，给出通道与首个受影响包。 |
+| F3 复现入口 | IMPLEMENTED | 从原 `build/phase3/check.py`、`edges.py` 的参考核对路径提取关键比较。维护脚本使用本地输入和新输出目录，ObsPy 仅为可选验收依赖。 |
+| F4 整理 | IMPLEMENTED | 核对重复开发文档的 SHA-256 为 `1b65f592733f1ae730a8dd035b776b29e70eaa9d7f9286adc512b56c3c664a2e`，移除附件副本并忽略项目根目录的 `.codex-attachments/`。四份示例的来源线索、缺少的授权材料和依赖许可已列入 README。版本保持 0.1.0。 |
+| Linux Release | COMPILED | Xmake 3.1.2、GCC 16.2.1。完整配置构建 Core、CLI 和 GUI，使用 Qt 6.12.0 和 libmseed 3.5.3。关闭 GUI 与标准 miniSEED 后再次构建 Core 和 CLI，仍编译 Modified Reader。 |
+| C1–C5 运行验收 | NOT RUN | 本轮仅做静态检查和编译，未执行新脚本或转换样本。历史 T1–T10 的运行证据见上表。 |
+| C6 界面验收 | NOT RUN | 本轮未启动 GUI。Summary、Metadata 和导出的人工复核待执行。 |
+
+`git diff --check` 与核验脚本的 Python AST 语法检查通过。四份仓库原件的 SHA-256 与第一阶段样本清单一致。
+
+两套构建使用独立的 Xmake 配置和产物目录。以下保留实际使用的构建选项，`QT_SDK` 指向本机 Qt SDK，完整配置的 `PKG_CONFIG_PATH` 包含 libmseed 的 `mseed.pc`。本机借助 `XMAKE_GLOBALDIR` 复用已有包缓存。
+
+```sh
+export XMAKE_SKIP_HISTORY=y
+export XMAKE_CONFIGDIR="$PWD/build/phase3-closeout-build/config"
+xmake f -m release -o build/phase3-closeout-build/full --policies=package.fetch_only \
+  --build_gui=y --enable_mseed=y --qt="$QT_SDK"
+xmake build -j 4
+
+export XMAKE_CONFIGDIR="$PWD/build/phase3-closeout-build/config-lite"
+xmake f -m release -o build/phase3-closeout-build/lite --policies=package.fetch_only \
+  --build_gui=n --enable_mseed=n
+xmake build -j 4 gmtools
+
+git diff --check
+python3 -c "import ast, pathlib; ast.parse(pathlib.Path('scripts/verify_core_formats.py').read_text(encoding='utf-8'))"
+```
+
+复核时，脚本将文本和 SAC 样本按其输入精度逐点比较，用手工 counts 夹具检查旧 v1、损坏来源字段和再次导出。提供指定武汉文件后，时间用例以 100 µs 的 BTime 刻度构造完全连续、容差内、超容差和未知时间的包，用有理数独立计算期望残差。提供 ObsPy 后，另以独立解码样本检查武汉标定公式和花莲各通道。脚本只覆盖上述路径。Windows/MSVC、桌面 DPI/主题、GUI 全选项、wt/ws 实录及 NIED 正式样本的状态沿用上一节。[核验脚本与参数示例](../../README.md#本地复核)

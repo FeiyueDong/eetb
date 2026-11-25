@@ -232,6 +232,7 @@ ReadResult read_knet(std::span<const std::byte> bytes, FormatId format, const Te
         metadata["knet.sensor_position"] = channel.ends_with('1') ? "borehole" : "surface";
     metadata["knet.sampling_frequency_hz"] = number(*hz);
     metadata["knet.raw_unit"] = "counts";
+    metadata["source.original_quantity"] = metadata["source.original_unit"] = "counts";
     metadata["knet.scale_factor"] = scale.value;
     metadata["knet.scale_factor_cmps2_per_count"] = number(*coeff);
     metadata["source.dt"] = "NIED Sampling Freq(Hz)";

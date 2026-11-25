@@ -1,4 +1,5 @@
 #include "../core/detail.hpp"
+#include "text_provenance.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -444,6 +445,8 @@ ReadResult read_text(std::span<const std::byte> bytes, FormatId format, const Te
             trace.unit = *unit;
             trace.quantity = *quantity;
             trace.attributes.clear();
+            if (meta.contains("provenance"))
+                read_text_provenance(meta.at("provenance"), trace);
             for (const auto* key :
                  {"station.network", "station.code", "station.location", "channel.code", "channel.source_id"})
                 if (meta.contains(key))
@@ -665,11 +668,18 @@ WriteResult write_text(const Trace& trace, const WriteOptions& options) {
             if (trace.attributes.contains(key))
                 meta[key] = trace.attributes.at(key);
         try {
+            write_text_provenance(meta, trace);
             output = "# GMTools waveform 1\n# " + meta.dump() + "\n";
-        } catch (const nlohmann::json::exception& e) {
+        } catch (const std::exception& e) {
             error(result.diagnostics, "text", e.what());
             return result;
         }
+        if (std::ranges::any_of(trace.attributes, [](const auto& attr) {
+                const auto& key = attr.first;
+                return key.starts_with("sac.") || key.starts_with("mseed.") || key.starts_with("modified.") ||
+                       key.starts_with("knet.") || key.starts_with("peer.");
+            }))
+            warn(result.diagnostics, "text", "waveform header omits format-specific source fields");
     } else if (trace.dt_seconds || trace.start_time || trace.relative_start_seconds ||
                trace.unit != Unit::Unknown || !trace.attributes.empty()) {
         warn(result.diagnostics, "text",

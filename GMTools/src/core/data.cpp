@@ -42,6 +42,34 @@ const UnitInfo& info(Unit unit) {
             return item;
     return unit_table[0];
 }
+
+void remember_input_labels(Trace& trace) {
+    auto& attrs = trace.attributes;
+    if (attrs.contains("source.original_quantity") || attrs.contains("source.original_unit"))
+        return;
+    if (trace.quantity != Quantity::Unknown)
+        attrs["source.original_quantity"] = name(trace.quantity);
+    if (trace.unit != Unit::Unknown)
+        attrs["source.original_unit"] = name(trace.unit);
+}
+
+bool has_physical_samples(const Trace& trace) {
+    const auto physical = [](Quantity quantity) {
+        return quantity != Quantity::Unknown && quantity != Quantity::Counts;
+    };
+    if (physical(trace.quantity) || physical(quantity_for(trace.unit)) ||
+        trace.attributes.contains("history.calibration.source") || trace.attributes.contains("history.last_conversion_unit"))
+        return true;
+    for (const auto* prefix : {"source.", "history."}) {
+        const auto quantity = trace.attributes.find(std::string{prefix} + "original_quantity");
+        if (quantity != trace.attributes.end() && physical(quantity_from_name(quantity->second).value_or(Quantity::Unknown)))
+            return true;
+        const auto unit = trace.attributes.find(std::string{prefix} + "original_unit");
+        if (unit != trace.attributes.end() && physical(quantity_for(unit_from_name(unit->second).value_or(Unit::Unknown))))
+            return true;
+    }
+    return false;
+}
 } // namespace
 
 Quantity quantity_for(Unit unit) { return info(unit).quantity; }
@@ -214,8 +242,13 @@ Diagnostics apply_overrides(Trace& trace, const Overrides& user) {
         const auto current = trace.attributes.find(key);
         return current != trace.attributes.end() && current->second == "counts";
     };
+    const auto& attrs = trace.attributes;
+    const bool calibrated_history = attrs.contains("history.calibration.source");
+    if ((unit == Unit::Counts || quantity == Quantity::Counts) && has_physical_samples(trace))
+        detail::error(diagnostics, "override", "physical waveform samples cannot be reinterpreted as raw counts");
     const bool from_counts = trace.quantity == Quantity::Counts || trace.unit == Unit::Counts ||
-        original_counts("source.original_quantity") || original_counts("source.original_unit");
+        original_counts("source.original_quantity") || original_counts("source.original_unit") ||
+        (!calibrated_history && (original_counts("history.original_quantity") || original_counts("history.original_unit")));
     if (from_counts &&
         (quantity == Quantity::Acceleration || quantity == Quantity::Velocity ||
          quantity == Quantity::Displacement || unit_factor(unit, unit).has_value()) &&
@@ -240,12 +273,12 @@ Diagnostics apply_overrides(Trace& trace, const Overrides& user) {
         trace.dt_seconds = dt;
         trace.attributes["source.dt"] = user.fs_hz ? "user sampling rate" : "user sampling interval";
     }
+    if (unit != trace.unit || quantity != trace.quantity)
+        remember_input_labels(trace);
     if (user.unit) {
         if (trace.unit != Unit::Unknown && trace.unit != unit)
             detail::warn(diagnostics, "override", "unit relabeled from " + std::string{name(trace.unit)} +
                                                   " to " + std::string{name(unit)} + "; samples unchanged");
-        if (trace.unit != Unit::Unknown && !trace.attributes.contains("source.original_unit"))
-            trace.attributes["source.original_unit"] = name(trace.unit);
         trace.unit = unit;
         trace.attributes["source.unit"] = "user input";
     }
@@ -253,8 +286,6 @@ Diagnostics apply_overrides(Trace& trace, const Overrides& user) {
         if (trace.quantity != Quantity::Unknown && trace.quantity != quantity)
             detail::warn(diagnostics, "override", "physical quantity relabeled from " +
                 std::string{name(trace.quantity)} + " to " + std::string{name(quantity)});
-        if (trace.quantity != Quantity::Unknown && !trace.attributes.contains("source.original_quantity"))
-            trace.attributes["source.original_quantity"] = name(trace.quantity);
         trace.quantity = quantity;
         trace.attributes["source.quantity"] = user.quantity ? "user input" : "user input unit";
     }
@@ -273,7 +304,9 @@ Diagnostics process_read(Trace& trace, const ReadOptions& opts) {
     if (opts.calibration == Calibration::Manual) {
         calibration = opts.calibration_factor;
         target = opts.calibration_unit;
-        if (trace.unit != Unit::Counts && trace.quantity != Quantity::Counts &&
+        if (has_physical_samples(trace))
+            error(ds, "calibration", "physical waveform samples cannot be calibrated as raw counts");
+        else if (trace.unit != Unit::Counts && trace.quantity != Quantity::Counts &&
             !(trace.unit == Unit::Unknown && trace.quantity == Quantity::Unknown &&
               (opts.overrides.unit == Unit::Counts || opts.overrides.quantity == Quantity::Counts)))
             error(ds, "calibration", "manual calibration requires known counts or explicit counts input");
@@ -286,7 +319,7 @@ Diagnostics process_read(Trace& trace, const ReadOptions& opts) {
         const auto sensitivity = parse_number(attrs.at("modified.sensitivity"));
         target = unit_from_name(attrs.at("modified.si_unit"));
         if (attrs.at("modified.dimension") == "dimensionless" && sensitivity && positive(*sensitivity))
-            warn(ds, "calibration", "dimensionless auxiliary channel retained as raw counts");
+            warn(ds, "calibration", "dimensionless auxiliary channel retains counts units");
         else if (!sensitivity || !positive(*sensitivity) || !target || !unit_factor(*target, *target))
             error(ds, "calibration", "source sensitivity or physical dimension is undefined");
         else
@@ -329,8 +362,10 @@ Diagnostics process_read(Trace& trace, const ReadOptions& opts) {
         }
     }
     if (factor) {
+        remember_input_labels(trace);
         attrs["text.numeric_factor"] = number(*factor); // retained for Profile v1 consumers
-        attrs["source.numeric_factor"] = "user scaling after calibration";
+        attrs["source.numeric_factor"] = attrs.contains("calibration.applied_unit")
+                                           ? "user scaling after calibration" : "user scaling on import";
     }
     auto diagnostics = apply_overrides(trace, overrides);
     ds.insert(ds.end(), diagnostics.begin(), diagnostics.end());

@@ -225,7 +225,11 @@ ReadResult read_modified(std::span<const std::byte> bytes, FormatId id, const Te
     ReadResult result;
     result.data.source_format = id;
     auto b = octets(bytes);
-    std::map<std::array<std::string, 4>, std::size_t> active;
+    struct Segment {
+        std::size_t index{};
+        std::int64_t max_residual_ns{};
+    };
+    std::map<std::array<std::string, 4>, Segment> active;
     std::size_t record = 0;
     try {
         while (!b.empty()) {
@@ -260,19 +264,38 @@ ReadResult read_modified(std::span<const std::byte> bytes, FormatId id, const Te
             const auto type = text(0, 2);
             const auto sequence = be_u32(p + 2) & 0x1fffffff;
             auto [it, first] = active.try_emplace(key);
+            auto& active_segment = it->second;
             bool continuous = false;
             std::size_t segment = 1;
             if (!first) {
-                const auto& previous = result.data.traces[it->second];
+                auto& previous = result.data.traces[active_segment.index];
                 const auto& attrs = previous.attributes;
                 segment = *parse_index(attrs.at("modified.segment")) + 1;
                 if (start && previous.start_time && dt == previous.dt_seconds &&
                     raw_text == attrs.at("modified.dimension_sensitivity") && order == attrs.at("modified.order") &&
                     type == attrs.at("modified.packet_type")) {
-                    const long double elapsed = (static_cast<long double>(start->time_since_epoch().count()) -
-                                                 previous.start_time->time_since_epoch().count()) *
-                                                1e-9L;
-                    continuous = std::abs(elapsed - previous.samples.size() * dt) <= std::min(0.0001, dt / 16);
+                    // BTime and the applied correction are both exact multiples of 100 microseconds.
+                    // Subtract in integer microseconds first; the full supported date span fits in int64.
+                    using std::chrono::microseconds;
+                    using std::chrono::time_point_cast;
+                    const auto elapsed = time_point_cast<microseconds>(*start) -
+                                         time_point_cast<microseconds>(*previous.start_time);
+                    const long double expected_ns = previous.samples.size() * 1'000'000'000.0L / hz;
+                    const long double residual_ns = std::abs(elapsed.count() * 1000.0L - expected_ns);
+                    continuous = residual_ns <= std::min(100'000.0L, dt * 1'000'000'000.0L / 16);
+                    if (continuous) {
+                        const auto ns = std::llround(residual_ns);
+                        if (ns > active_segment.max_residual_ns) {
+                            if (active_segment.max_residual_ns == 0) {
+                                warn(result.diagnostics, "modified-mseed", "record " + std::to_string(record) +
+                                     ": " + previous.name + " joined within timing tolerance; all samples retained "
+                                     "on the uniform grid from the first sample");
+                                result.diagnostics.back().channel = active_segment.index + 1;
+                            }
+                            active_segment.max_residual_ns = ns;
+                            previous.attributes["modified.max_start_residual_ns"] = std::to_string(ns);
+                        }
+                    }
                 }
             }
             if (!continuous) {
@@ -281,7 +304,7 @@ ReadResult read_modified(std::span<const std::byte> bytes, FormatId id, const Te
                          "record " + std::to_string(record) +
                              (start ? ": new segment (timing or header changed)"
                                     : ": unknown BTime, isolated segment"));
-                it->second = result.data.traces.size();
+                active_segment = {result.data.traces.size(), 0};
                 auto& trace = result.data.traces.emplace_back();
                 MetadataEdit identity;
                 identity.network = key[0];
@@ -316,7 +339,7 @@ ReadResult read_modified(std::span<const std::byte> bytes, FormatId id, const Te
                 attrs["modified.order"] = order;
                 attrs["modified.extension_byte"] = std::to_string(p[59]);
             }
-            auto& trace = result.data.traces[it->second];
+            auto& trace = result.data.traces[active_segment.index];
             trace.attributes["modified.last_sequence"] = std::to_string(sequence);
             trace.samples.insert(trace.samples.end(), samples.begin(), samples.end());
             b = b.subspan(length);
