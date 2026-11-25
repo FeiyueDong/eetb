@@ -80,9 +80,9 @@ target("gmtools_core")
     set_default(false)
     add_includedirs("include", {public = true})
     add_packages("nlohmann_json")
-    add_files("src/core/data.cpp", "src/core/files.cpp", "src/core/profile.cpp",
+    add_files("src/core/data.cpp", "src/core/metadata.cpp", "src/core/files.cpp", "src/core/profile.cpp",
               "src/formats/registry.cpp", "src/formats/text.cpp", "src/formats/peer.cpp",
-              "src/formats/knet.cpp", "src/formats/sac.cpp")
+              "src/formats/modified_mseed.cpp", "src/formats/knet.cpp", "src/formats/sac.cpp")
     if has_config("enable_mseed") then
         add_files("src/formats/mseed.cpp")
         add_defines("GMTOOLS_HAVE_LIBMSEED")
@@ -109,7 +109,7 @@ if has_config("build_gui") then
         set_rundir("$(projectdir)")
         add_deps("gmtools_core")
         add_frameworks("QtConcurrent")
-        add_files("src/gui/main.cpp", "src/gui/main_window.cpp", "src/gui/parse_dialog.cpp",
+        add_files("src/gui/main.cpp", "src/gui/export_options.cpp", "src/gui/main_window.cpp", "src/gui/parse_dialog.cpp",
                   "src/gui/plot.cpp", "src/gui/theme.cpp", "src/gui/ui_helpers.cpp")
         on_config(function (target)
             import("core.base.semver")

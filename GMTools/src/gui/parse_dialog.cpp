@@ -1,6 +1,7 @@
 #include "parse_dialog.hpp"
 #include "background_task.hpp"
 #include "override_fields.hpp"
+#include <QCheckBox>
 #include "ui_helpers.hpp"
 
 #include <QProgressBar>
@@ -101,8 +102,38 @@ public:
         auto* override_form = new QFormLayout(override_group);
         overrides_ = std::make_unique<OverrideFields>(override_form, original.overrides);
         factor_ = line_field(override_form, QStringLiteral("Numeric factor"), QStringLiteral("Optional sample multiplier"));
-        factor_->setToolTip(QStringLiteral("Explicitly multiply text sample values. For K-NET, this is applied after instrument calibration.\n"
-                                          "This is separate from assigning an input unit or converting output units."));
+        factor_->setToolTip("Multiply decoded samples after any instrument calibration.");
+        calibration_ = new QComboBox;
+        calibration_->addItems(
+            {"Format default", "Raw counts / values", "Use file calibration", "Manual units per count"});
+        calibration_->setCurrentIndex(static_cast<int>(original.calibration));
+        override_form->addRow("Calibration", calibration_);
+        calibration_factor_ = line_field(override_form, "Units per count", "Physical units per count");
+        calibration_unit_ = new QComboBox;
+        calibration_unit_->addItem("Choose physical unit");
+        for (auto u : units())
+            if (unit_factor(u, u))
+                calibration_unit_->addItem(as_text(name(u)), static_cast<int>(u));
+        override_form->addRow("Calibrated unit", calibration_unit_);
+        if (original.calibration_factor)
+            calibration_factor_->setText(real(*original.calibration_factor));
+        if (original.calibration_unit)
+            calibration_unit_->setCurrentIndex(
+                calibration_unit_->findData(static_cast<int>(*original.calibration_unit)));
+        auto manual_visibility = [this, override_form] {
+            const bool manual = calibration_->currentIndex() == static_cast<int>(Calibration::Manual);
+            for (QWidget* field :
+                 {static_cast<QWidget*>(calibration_factor_), static_cast<QWidget*>(calibration_unit_)}) {
+                field->setVisible(manual);
+                override_form->labelForField(field)->setVisible(manual);
+            }
+        };
+        connect(calibration_, &QComboBox::currentIndexChanged, this, manual_visibility);
+        manual_visibility();
+        sac_units_ = new QCheckBox("Interpret SAC IDEP using standard nanounits");
+        sac_units_->setChecked(original.sac_standard_units.value_or(false));
+        override_form->addRow(sac_units_);
+        connect(sac_units_, &QCheckBox::toggled, this, [this] { invalidate_preview(); });
         load_text_options(original.text);
         settings->addWidget(override_group);
         profile_bar_ = new QWidget(parameters);
@@ -212,6 +243,12 @@ private:
 
     void load_options(const ReadOptions& options) {
         format_->setCurrentIndex(format_->findData(static_cast<int>(options.format)));
+        calibration_->setCurrentIndex(static_cast<int>(options.calibration));
+        calibration_factor_->setText(options.calibration_factor ? real(*options.calibration_factor) : QString{});
+        calibration_unit_->setCurrentIndex(
+            options.calibration_unit ? calibration_unit_->findData(static_cast<int>(*options.calibration_unit))
+                                     : 0);
+        sac_units_->setChecked(options.sac_standard_units.value_or(false));
         load_text_options(options.text);
         overrides_->set_options(options.overrides);
         update_text_fields();
@@ -222,8 +259,10 @@ private:
         if (format == FormatId::Auto)
             format = detected_;
         const bool generic = raw_ && is_generic_text(format);
-        text_group_->setEnabled(raw_.has_value() && (generic || format == FormatId::At2));
-        factor_->setEnabled(raw_.has_value() && (generic || format == FormatId::At2 || format == FormatId::KnetAscii));
+        text_group_->setEnabled(raw_.has_value() && (generic || format == FormatId::At2 ||
+                                                     format == FormatId::Dt2 || format == FormatId::Vt2));
+        text_group_->setVisible(text_group_->isEnabled());
+        sac_units_->setVisible(format == FormatId::Sac);
         profile_bar_->setVisible(generic);
         apply_suggestions_->setVisible(generic);
         const bool columnar = layout_->currentIndex() != 1;
@@ -236,6 +275,15 @@ private:
         result.format = static_cast<FormatId>(format_->currentData().toInt());
         result.extension_hint = extension_;
         result.overrides = overrides_->options();
+        result.calibration = static_cast<Calibration>(calibration_->currentIndex());
+        if (result.calibration == Calibration::Manual) {
+            result.calibration_factor =
+                optional_number(calibration_factor_, "Physical units per count must be finite");
+            if (calibration_unit_->currentData().isValid())
+                result.calibration_unit = static_cast<Unit>(calibration_unit_->currentData().toInt());
+        }
+        if (!sac_units_->isHidden() && sac_units_->isChecked())
+            result.sac_standard_units = true;
         if (factor_->isEnabled())
             result.text.numeric_factor = optional_number(factor_, "Numeric factor must be finite");
         if (!text_group_->isEnabled())
@@ -319,8 +367,23 @@ private:
 
     void show_raw(std::size_t highlight) {
         if (!raw_) {
-            raw_label_->setText(QStringLiteral("Raw preview"));
-            raw_view_->setPlainText(QStringLiteral("Binary input or unsupported text encoding"));
+            raw_label_->setText(QStringLiteral("Record headers"));
+            QString headers;
+            if (preview_) {
+                for (const auto& trace : preview_->parsed.data.traces) {
+                    headers += as_text(trace.name) + "\n";
+                    if (trace.start_time)
+                        headers += as_text(timestamp(*trace.start_time)) + "\n";
+                    for (const auto* key : {"modified.dimension", "modified.sensitivity", "calibration.factor",
+                                            "mseed.encoding", "sac.reference_utc"})
+                        if (trace.attributes.contains(key))
+                            headers += as_text(key) + " = " + as_text(trace.attributes.at(key)) + "\n";
+                    headers += "\n";
+                }
+            }
+            raw_view_->setPlainText(headers.isEmpty()
+                                        ? QStringLiteral("Preview the file to inspect decoded headers.")
+                                        : headers.trimmed());
             return;
         }
         // Keep the view bounded while allowing navigation to any selected input line.
@@ -375,6 +438,8 @@ private:
 
     void invalidate_preview() {
         preview_.reset();
+        if (!raw_)
+            show_raw(0);
         apply_suggestions_->setEnabled(false);
         feedback_->setPlainText(QStringLiteral("Settings changed. Choose Preview parse or Import channels to apply them."));
     }
@@ -459,6 +524,10 @@ private:
     QLineEdit* columns_{};
     QLineEdit* time_{};
     QLineEdit* factor_{};
+    QComboBox* calibration_{};
+    QComboBox* calibration_unit_{};
+    QLineEdit* calibration_factor_{};
+    QCheckBox* sac_units_{};
     std::unique_ptr<OverrideFields> overrides_;
     QLabel* raw_label_{};
     QPlainTextEdit* raw_view_{};

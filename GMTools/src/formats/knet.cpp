@@ -197,8 +197,6 @@ ReadResult read_knet(std::span<const std::byte> bytes, FormatId format, const Te
         options.time_column || !options.data_columns.empty()) {
         error(result.diagnostics, "knet", "text layout options conflict with the K-NET waveform block. Select a general text format to reinterpret it", first);
     }
-    if (options.numeric_factor && (!std::isfinite(*options.numeric_factor) || *options.numeric_factor == 0.0))
-        error(result.diagnostics, "knet", "explicit numeric factor must be finite and nonzero");
     if (has_errors(result.diagnostics))
         return result;
 
@@ -215,12 +213,10 @@ ReadResult read_knet(std::span<const std::byte> bytes, FormatId format, const Te
     trace.dt_seconds = 1.0 / *hz;
     trace.quantity = Quantity::Acceleration;
     trace.unit = Unit::Cmps2;
-    const auto factor = options.numeric_factor.value_or(1.0);
     for (std::size_t i = 0; i < trace.samples.size(); ++i) {
         const auto count = trace.samples[i];
-        const auto calibrated = count * *coeff;
-        const auto sample = calibrated * factor;
-        if (!std::isfinite(calibrated) || !std::isfinite(sample) || (count != 0.0 && sample == 0.0)) {
+        const auto sample = count * *coeff;
+        if (!std::isfinite(sample) || (count != 0.0 && sample == 0.0)) {
             error(result.diagnostics, "knet", "sample exceeds numeric range after scaling at index " +
                   std::to_string(i + 1));
             result.data.traces.clear();
@@ -242,10 +238,12 @@ ReadResult read_knet(std::span<const std::byte> bytes, FormatId format, const Te
     metadata["source.name"] = "NIED Dir.";
     metadata["source.quantity"] = "NIED K-NET ASCII acceleration";
     metadata["source.unit"] = "NIED Scale Factor applied to counts";
-    if (options.numeric_factor) {
-        metadata["text.numeric_factor"] = number(factor);
-        metadata["source.numeric_factor"] = "user input applied after NIED instrument calibration";
-    }
+    metadata["source.sample_type"] = "integer counts";
+    metadata["calibration.source"] = "NIED Scale Factor";
+    metadata["calibration.factor"] = number(*coeff);
+    metadata["calibration.applied_unit"] = name(trace.unit);
+    metadata["station.code"] = station.value;
+    metadata["channel.code"] = channel;
 
     const auto record = get("Record Time");
     trace.start_time = first_sample_time(record.value);

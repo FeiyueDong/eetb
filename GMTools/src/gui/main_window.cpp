@@ -1,5 +1,6 @@
 #include "main_window.hpp"
 #include "background_task.hpp"
+#include "export_options.hpp"
 #include "override_fields.hpp"
 #include "ui_helpers.hpp"
 
@@ -238,10 +239,13 @@ MainWindow::MainWindow() {
     target_->setCurrentIndex(target_->findData(static_cast<int>(FormatId::Csv)));
     export_form->addRow(QStringLiteral("Format"), target_);
     output_unit_ = new QComboBox(export_card);
-    output_unit_->addItem(QStringLiteral("Keep input unit"));
-    for (const auto unit : {Unit::G, Unit::Mps2, Unit::Cmps2})
-        output_unit_->addItem(as_text(name(unit)), static_cast<int>(unit));
     export_form->addRow(QStringLiteral("Unit"), output_unit_);
+    format_options_ = new QPushButton("Format options…", export_card);
+    export_form->addRow(format_options_);
+    connect(format_options_, &QPushButton::clicked, this, [this] {
+        if (choose_writer_options(writer_, this))
+            update_format();
+    });
     export_box->addLayout(export_form);
     format_help_ = label({}, "muted", export_card);
     export_box->addWidget(format_help_);
@@ -303,9 +307,12 @@ MainWindow::MainWindow() {
 void MainWindow::choose_file() {
     if (busy_)
         return;
-    const auto file = QFileDialog::getOpenFileName(this, QStringLiteral("Open ground-motion record"),
+    const auto file = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Open ground-motion record"),
         QSettings().value(QStringLiteral("paths/input")).toString(),
-        QStringLiteral("Waveform files (*.txt *.dat *.csv *.tsv *.at2 *.AT2 *.sac *.SAC *.mseed *.miniseed *.msd *.ms *.knet *.ns *.ew *.ud *.ns1 *.ew1 *.ud1 *.ns2 *.ew2 *.ud2 *.NS *.EW *.UD *.NS1 *.EW1 *.UD1 *.NS2 *.EW2 *.UD2);;All files (*)"));
+        QStringLiteral("Waveform files (*.txt *.dat *.csv *.tsv *.at2 *.AT2 *.vt2 *.VT2 *.dt2 *.DT2 *.sac *.SAC "
+                       "*.mseed *.miniseed *.msd *.ms *.knet *.ns *.ew *.ud *.ns1 *.ew1 *.ud1 *.ns2 *.ew2 *.ud2 "
+                       "*.NS *.EW *.UD *.NS1 *.EW1 *.UD1 *.NS2 *.EW2 *.UD2);;All files (*)"));
     if (!file.isEmpty())
         open_file(file);
 }
@@ -424,6 +431,7 @@ void MainWindow::update_selection() {
     const bool ready = !busy_ && count > 0 && !output_directory_->text().isEmpty();
     export_->setEnabled(ready);
     export_action_->setEnabled(ready);
+    update_format();
 }
 
 void MainWindow::show_trace(bool scroll) {
@@ -453,6 +461,17 @@ void MainWindow::show_trace(bool scroll) {
         property(QStringLiteral("Relative start"), displayed_number(*trace.relative_start_seconds) + QStringLiteral(" s"));
     if (trace.start_time)
         property(QStringLiteral("Start · UTC"), as_text(timestamp(*trace.start_time)));
+    for (const auto& [key, label] : {std::pair{"modified.sensitivity", "Encoded sensitivity"},
+                                     {"modified.dimension", "Sensor quantity"},
+                                     {"modified.segment", "Segment"},
+                                     {"mseed.segment", "Segment"},
+                                     {"channel.source_id", "Source ID"},
+                                     {"calibration.source", "Calibration"},
+                                     {"calibration.factor", "Units per count"}})
+        if (trace.attributes.contains(key))
+            property(label, as_text(trace.attributes.at(key)));
+    if (trace.attributes.contains("modified.sensitivity") && !trace.attributes.contains("calibration.applied_unit"))
+        property("Calibration", "Raw counts");
     QString metadata;
     if (!parsed_->data.attributes.empty()) {
         metadata = QStringLiteral("FILE FIELDS");
@@ -469,19 +488,47 @@ void MainWindow::show_trace(bool scroll) {
 
 void MainWindow::update_format() {
     const auto format = static_cast<FormatId>(target_->currentData().toInt());
-    const bool at2 = format == FormatId::At2;
-    if (at2)
-        output_unit_->setCurrentIndex(0);
-    output_unit_->setEnabled(!at2);
-    output_unit_->setItemText(0, at2 ? QStringLiteral("g · required by AT2") : QStringLiteral("Keep input unit"));
+    if (writer_.format != format) {
+        writer_ = WriteOptions{};
+        writer_.format = format;
+    }
+    const bool peer = format == FormatId::At2 || format == FormatId::Vt2 || format == FormatId::Dt2;
+    const bool standard = writer_.sac_standard_units.value_or(false);
+    const auto previous = output_unit_->currentData();
+    output_unit_->clear();
+    const auto required = format == FormatId::At2 ? Unit::G : format == FormatId::Vt2 ? Unit::Cmps : Unit::Cm;
+    output_unit_->addItem(peer       ? as_text(name(required))
+                          : standard ? QStringLiteral("Standard nanounits")
+                                     : QStringLiteral("Keep input unit"));
+    std::optional<Quantity> common;
+    if (!peer && !standard && parsed_) {
+        for (int i = 0; i < channels_->count(); ++i) {
+            if (channels_->item(i)->checkState() != Qt::Checked)
+                continue;
+            const auto& trace = parsed_->data.traces.at(static_cast<std::size_t>(i));
+            if (!unit_factor(trace.unit, trace.unit) || (common && common != trace.quantity)) {
+                common.reset();
+                break;
+            }
+            common = trace.quantity;
+        }
+        for (auto u : units())
+            if (common == quantity_for(u) && unit_factor(u, u))
+                output_unit_->addItem(as_text(name(u)), static_cast<int>(u));
+        output_unit_->setCurrentIndex(std::max(0, output_unit_->findData(previous)));
+    }
+    output_unit_->setEnabled(output_unit_->count() > 1);
+    format_options_->setVisible(!peer);
     if (is_generic_text(format))
-        format_help_->setText(QStringLiteral("One amplitude column per file. Timing and unit metadata are not stored in plain text."));
-    else if (at2)
-        format_help_->setText(QStringLiteral("Requires a sampling interval and a known acceleration unit. Values are converted to g."));
+        format_help_->setText(writer_.text_header == TextHeader::Metadata
+                                  ? "Waveform metadata will be retained."
+                                  : "Choose a metadata header to retain timing, units and channel identifiers.");
+    else if (peer)
+        format_help_->setText("Requires a sampling interval and compatible physical units.");
     else if (format == FormatId::Sac)
-        format_help_->setText(QStringLiteral("Experimental · SAC v7, float32 samples. Requires a sampling interval; engineering units need separate confirmation."));
+        format_help_->setText(QString("SAC v%1 · float32 samples").arg(writer_.sac_version.value_or(7)));
     else
-        format_help_->setText(QStringLiteral("Experimental · requires an absolute start time, sampling interval and a valid source identifier."));
+        format_help_->setText("Requires UTC, sampling interval and a representable source identifier.");
 }
 
 void MainWindow::edit_trace() {
@@ -500,6 +547,37 @@ void MainWindow::edit_trace() {
     form->addRow(label(timing_unit(trace), "muted", &dialog));
     const OverrideFields fields(form, {}, QStringLiteral("Keep current"));
     form->addRow(label(QStringLiteral("Input units describe the existing values. To convert values, choose an output unit in Export."), "muted", &dialog));
+    MetadataEdit edits;
+    using Field = std::optional<std::string> MetadataEdit::*;
+    struct Editor {
+        Field field;
+        QLineEdit* widget;
+        QString original;
+    };
+    std::vector<Editor> editors;
+    auto add_edit = [&](const char* label, Field field, std::string initial) {
+        auto* line = new QLineEdit(as_text(initial), &dialog);
+        line->setPlaceholderText(field == &MetadataEdit::start_utc ? "YYYY-MM-DDTHH:MM:SS[.fraction]Z" : "Unknown");
+        editors.push_back({field, line, line->text()});
+        form->addRow(label, line);
+    };
+    add_edit("First sample · UTC", &MetadataEdit::start_utc, trace.start_time ? timestamp(*trace.start_time) : "");
+    add_edit("Relative start (s)", &MetadataEdit::relative_start,
+             trace.relative_start_seconds ? as_utf8(real(*trace.relative_start_seconds)) : "");
+    auto value = [&](const char* key) {
+        return trace.attributes.contains(key) ? trace.attributes.at(key) : std::string{};
+    };
+    add_edit("Network", &MetadataEdit::network, value("station.network"));
+    add_edit("Station", &MetadataEdit::station, value("station.code"));
+    const auto location = value("station.location");
+    add_edit("Location", &MetadataEdit::location,
+             location.empty() && trace.attributes.contains("station.location") ? "--" : location);
+    editors.back().widget->setPlaceholderText("Unknown · use -- for an empty code");
+    add_edit("Channel code", &MetadataEdit::channel, value("channel.code"));
+    add_edit("Source ID", &MetadataEdit::source_id, value("channel.source_id"));
+    form->addRow(label("Leave a field unchanged to keep it. Erase its contents to clear it. Edit the source ID or "
+                       "individual codes.",
+                       "muted", &dialog));
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setProperty("role", "primary");
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Apply changes"));
@@ -509,7 +587,29 @@ void MainWindow::edit_trace() {
         try {
             const auto options = fields.options();
             const auto new_name = as_utf8(channel_name->text().trimmed());
-            const bool changed = options.dt_seconds || options.fs_hz || options.quantity || options.unit || new_name != trace.name;
+            for (const auto& e : editors) {
+                auto& field = edits.*e.field;
+                field.reset();
+                if (e.widget->text() != e.original)
+                    field = as_utf8(e.widget->text().trimmed());
+            }
+            edits.clear_location = edits.location && edits.location->empty();
+            if (edits.clear_location)
+                edits.location.reset();
+            else if (edits.location == "--")
+                edits.location = "";
+            Trace metadata;
+            metadata.attributes = trace.attributes;
+            metadata.start_time = trace.start_time;
+            metadata.relative_start_seconds = trace.relative_start_seconds;
+            auto validation = edit_metadata(metadata, edits);
+            if (has_errors(validation)) {
+                QMessageBox::warning(&dialog, "Invalid metadata", diagnostic_text(validation));
+                return;
+            }
+            const bool changed = edits.start_utc || edits.relative_start || edits.has_identity() ||
+                                 options.dt_seconds || options.fs_hz || options.quantity || options.unit ||
+                                 new_name != trace.name;
             auto diagnostics = apply_overrides(trace, options);
             if (has_errors(diagnostics)) {
                 QMessageBox::warning(&dialog, QStringLiteral("Invalid parameters"), diagnostic_text(diagnostics));
@@ -525,6 +625,7 @@ void MainWindow::edit_trace() {
                 trace.name = new_name;
                 trace.attributes["source.name"] = "user input";
             }
+            edit_metadata(trace, edits);
             edited_ |= changed;
             dialog.accept();
         } catch (const std::exception& problem) {
@@ -538,6 +639,7 @@ void MainWindow::edit_trace() {
         diagnostics_->setPlainText(parsed_->diagnostics.empty() ? QStringLiteral("No import diagnostics.") : diagnostic_text(parsed_->diagnostics));
         trace_plots_[static_cast<std::size_t>(row)]->set_metadata(trace);
         show_trace(false);
+        update_format();
     }
 }
 
@@ -557,7 +659,7 @@ void MainWindow::send_export() {
     }
     if (options.channels.empty() || output_directory_->text().isEmpty())
         return;
-    options.writer.format = static_cast<FormatId>(target_->currentData().toInt());
+    options.writer = writer_;
     if (output_unit_->currentData().isValid())
         options.writer.output_unit = static_cast<Unit>(output_unit_->currentData().toInt());
     options.output = path_from_utf8(as_utf8(output_directory_->text()));

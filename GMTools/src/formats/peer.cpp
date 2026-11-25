@@ -41,36 +41,35 @@ bool numeric_row(std::string_view line) {
     return false;
 }
 
-bool acceleration_header(std::string_view lower_line) {
-    return lower_line.starts_with("acceleration") &&
-        (lower_line.find("time series") != lower_line.npos ||
-         lower_line.find("time history") != lower_line.npos);
+FormatId declared_family(std::string_view line) {
+    if (line.find("time series") == line.npos && line.find("time history") == line.npos)
+        return FormatId::Auto;
+    if (line.starts_with("acceleration "))
+        return FormatId::At2;
+    if (line.starts_with("velocity "))
+        return FormatId::Vt2;
+    if (line.starts_with("displacement "))
+        return FormatId::Dt2;
+    return FormatId::Auto;
 }
-
 } // namespace
 
-bool detect_peer(std::span<const std::byte> bytes) {
-    if (bytes.empty())
-        return false;
-    std::string_view prefix{reinterpret_cast<const char*>(bytes.data()),
-                            std::min<std::size_t>(bytes.size(), 8192)};
-    bool has_acceleration_header = false;
-    bool has_count_or_dt = false;
-    for (const auto line : lines(prefix)) {
-        const auto lower_line = lower(trim(line));
-        if (lower_line.find("peer nga") != lower_line.npos ||
-            lower_line.find("pacific engineering and analysis strong-motion data") != lower_line.npos)
-            return true;
-        if (line.find('\0') != line.npos)
+FormatId peer_family(std::span<const std::byte> bytes) {
+    std::string_view prefix{reinterpret_cast<const char*>(bytes.data()), std::min<std::size_t>(bytes.size(), 8192)};
+    FormatId family = FormatId::Auto;
+    bool structural = false;
+    for (auto line : lines(prefix)) {
+        const auto words = lower(trim(line));
+        if (const auto found = declared_family(words); found != FormatId::Auto)
+            family = found;
+        if (field(line, dt_field()) || field(line, npts_field()))
+            structural = true;
+        if (structural && family != FormatId::Auto)
+            return family;
+        if (numeric_row(trim(line)))
             break;
-        const auto has_count = field(line, npts_field()).has_value();
-        const auto has_dt = field(line, dt_field()).has_value();
-        if (has_count && has_dt)
-            return true;
-        has_acceleration_header |= acceleration_header(lower_line);
-        has_count_or_dt |= has_count || has_dt;
     }
-    return has_acceleration_header && has_count_or_dt;
+    return FormatId::Auto;
 }
 
 ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const TextParseOptions& options) {
@@ -78,7 +77,7 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
     result.data.source_format = format;
     const auto text = text_view(bytes);
     if (!text) {
-        error(result.diagnostics, "peer", "expected a UTF-8/ASCII PEER AT2 file");
+        error(result.diagnostics, "peer", "expected a UTF-8/ASCII PEER waveform file");
         return result;
     }
 
@@ -111,17 +110,18 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
         if (npts && dt)
             break;
         const auto words = lower(trim(line));
-        if (words.starts_with("velocity time series") || words.starts_with("velocity time history") ||
-            words.starts_with("displacement time series") || words.starts_with("displacement time history")) {
-            error(result.diagnostics, "peer", "PEER velocity and displacement records are outside AT2 support", i + 1);
-            return result;
-        }
-        if (acceleration_header(words)) {
-            quantity = Quantity::Acceleration;
+        const auto declared = declared_family(words);
+        if (declared != FormatId::Auto) {
+            if (declared != format) {
+                error(result.diagnostics, "peer", "declared quantity conflicts with requested PEER family", i + 1);
+                return result;
+            }
+            quantity = declared == FormatId::At2   ? Quantity::Acceleration
+                       : declared == FormatId::Vt2 ? Quantity::Velocity
+                                                   : Quantity::Displacement;
             if (const auto start = words.find("units of "); start != words.npos) {
                 auto label = trim(std::string_view{words}.substr(start + 9));
-                if (label.ends_with('.'))
-                    label.remove_suffix(1);
+                label = trim(label.substr(0, label.find_first_of(".,;")));
                 unit = unit_from_name(label).value_or(Unit::Unknown);
             }
         } else if (!trim(line).empty() && words.find("strong motion database") == words.npos &&
@@ -131,6 +131,10 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
         // Once a recognizable numeric row begins, a missing header field cannot follow it.
         if (numeric_row(trim(line)))
             break;
+    }
+    if (quantity == Quantity::Unknown || (unit != Unit::Unknown && quantity != quantity_for(unit))) {
+        error(result.diagnostics, "peer", "missing quantity declaration or incompatible header unit");
+        return result;
     }
     if (!dt) {
         error(result.diagnostics, "peer", "missing PEER header field DT");
@@ -149,7 +153,7 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
         return result;
     if (result.data.traces.size() != 1) {
         result.data.traces.clear();
-        error(result.diagnostics, "peer", "an AT2 record must contain one trace; use Text for a channel matrix");
+        error(result.diagnostics, "peer", "a PEER record must contain one trace; use Text for a channel matrix");
         return result;
     }
     if ((options.first_line && options.first_line != declared_first_line) ||
@@ -173,20 +177,17 @@ ReadResult read_peer(std::span<const std::byte> bytes, FormatId format, const Te
     trace.attributes["source.dt"] = "PEER header DT";
     if (npts)
         trace.attributes["peer.npts"] = std::to_string(*npts);
-    if (quantity != Quantity::Unknown)
-        trace.attributes["source.quantity"] = "PEER header";
-    else
-        warn(result.diagnostics, "peer", "acceleration time-series label is missing");
+    trace.attributes["source.quantity"] = "PEER header";
     if (unit != Unit::Unknown)
         trace.attributes["source.unit"] = "PEER header";
     else
-        warn(result.diagnostics, "peer", "acceleration unit is missing or unrecognized");
+        warn(result.diagnostics, "peer", "engineering unit is missing or unrecognized");
     if (!description.empty())
         trace.attributes["peer.description"] = description;
     return result;
 }
 
-WriteResult write_peer(const Trace& trace, FormatId) {
+WriteResult write_peer(const Trace& trace, const WriteOptions& options) {
     WriteResult result;
     std::string description = "Converted by GMTools";
     if (const auto desc = trace.attributes.find("peer.description"); desc != trace.attributes.end())
@@ -197,19 +198,26 @@ WriteResult write_peer(const Trace& trace, FormatId) {
     std::ranges::replace(description, '\r', ' ');
     // Free-form descriptions must not look like structural header fields.
     if (!text_view(std::as_bytes(std::span{description})) || numeric_row(trim(description)) ||
-        acceleration_header(lower(trim(description))) || field(description, npts_field()) ||
+        declared_family(lower(trim(description))) != FormatId::Auto || field(description, npts_field()) ||
         field(description, dt_field()))
         description = "Converted by GMTools";
 
-    std::string output = "GMTools PEER NGA FORMAT ACCELERATION RECORD\n" + description +
-        "\nACCELERATION TIME SERIES IN UNITS OF G\nNPTS= " +
-        std::to_string(trace.samples.size()) + ", DT= " + number(*trace.dt_seconds) + " SEC\n";
+    const std::string quantity = options.format == FormatId::At2   ? "ACCELERATION"
+                                 : options.format == FormatId::Vt2 ? "VELOCITY"
+                                                                   : "DISPLACEMENT";
+    const std::string unit = options.format == FormatId::At2   ? "G"
+                             : options.format == FormatId::Vt2 ? "CM/S"
+                                                               : "CM";
+    std::string output = "GMTools PEER NGA FORMAT " + quantity + " RECORD\n" + description + "\n" + quantity +
+                         " TIME SERIES IN UNITS OF " + unit + "\nNPTS= " + std::to_string(trace.samples.size()) +
+                         ", DT= " + number(*trace.dt_seconds) + " SEC\n";
     for (std::size_t i = 0; i < trace.samples.size(); ++i) {
         output += number(trace.samples[i]);
         output += (i % 5 == 4 || i + 1 == trace.samples.size()) ? '\n' : ' ';
     }
     if (trace.relative_start_seconds || trace.start_time || !trace.name.empty() || !trace.attributes.empty())
-        warn(result.diagnostics, "peer", "AT2 retains dt and acceleration in g; other timing and channel metadata may be lost");
+        warn(result.diagnostics, "peer",
+             "PEER retains dt and target engineering unit; other timing and channel metadata may be lost");
     result.bytes = bytes_of(output);
     return result;
 }

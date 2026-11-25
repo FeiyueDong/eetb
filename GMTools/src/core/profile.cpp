@@ -251,6 +251,10 @@ Diagnostics save_profile(const std::filesystem::path& path, const ReadOptions& o
                          const std::filesystem::path& protected_input) {
     Diagnostics diagnostics;
     try {
+        if (options.calibration != Calibration::Default || options.calibration_factor || options.calibration_unit ||
+            options.metadata.has_identity() || options.metadata.start_utc || options.metadata.relative_start ||
+            options.sac_standard_units)
+            invalid("profile", "schema v1 stores text layout, scaling and parameter overrides only");
         const auto json = encode(options).dump(2) + "\n";
         detail::save_text_file(path, json, overwrite, protected_input, diagnostics);
     } catch (const std::exception& problem) {
@@ -279,6 +283,12 @@ ProfileResult merge_profile(const ReadOptions& profile, const ReadOptions& expli
             changed("format");
         merged.format = explicit_options.format;
     }
+    merged.calibration = explicit_options.calibration;
+    merged.calibration_factor = explicit_options.calibration_factor;
+    merged.calibration_unit = explicit_options.calibration_unit;
+    merged.metadata = explicit_options.metadata;
+    merged.selected_channel = explicit_options.selected_channel;
+    merged.sac_standard_units = explicit_options.sac_standard_units;
     merged.extension_hint = explicit_options.extension_hint;
     auto& text = merged.text;
     const auto& input = explicit_options.text;

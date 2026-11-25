@@ -70,6 +70,8 @@ private:
     QPushButton* export_{};
     QComboBox* target_{};
     QComboBox* output_unit_{};
+    QPushButton* format_options_{};
+    WriteOptions writer_;
     QCheckBox* overwrite_{};
     QLabel* format_help_{};
     QLineEdit* output_directory_{};

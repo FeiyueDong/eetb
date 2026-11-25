@@ -43,6 +43,19 @@ constexpr std::array label_fields{
     LabelField{"sac.kinst", 156, 8},
 };
 
+struct NumericField {
+    const char* key;
+    unsigned word;
+    int footer;
+    double low, high;
+};
+constexpr NumericField numeric_fields[] = {
+    {"sac.stla", 31, 19, -90, 90},           {"sac.stlo", 32, 18, -360, 360},
+    {"sac.stel", 33, -1, -1e7, 1e7},         {"sac.evla", 35, 17, -90, 90},
+    {"sac.evlo", 36, 16, -360, 360},         {"sac.evdp", 38, -1, -1e5, 1e5},
+    {"channel.azimuth_deg", 57, -1, 0, 360}, {"channel.inclination_deg", 58, -1, 0, 180},
+};
+
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559);
 static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559);
 
@@ -240,6 +253,8 @@ ReadResult read_sac(std::span<const std::byte> bytes, FormatId format, const Tex
             warn(result.diagnostics, "sac", "E disagrees with B, DELTA and NPTS");
     }
 
+    if (begin == undefined_float)
+        trace.attributes["sac.begin_undefined"] = "true";
     const auto dependent = integer(bytes, dependent_word, little);
     trace.quantity = dependent_quantity(dependent);
     if (trace.quantity != Quantity::Unknown) {
@@ -250,6 +265,36 @@ ReadResult read_sac(std::span<const std::byte> bytes, FormatId format, const Tex
         const auto value = header_text(bytes, word, width);
         if (!value.empty())
             trace.attributes[std::string{key}] = value;
+    }
+    MetadataEdit ids;
+    ids.network = metadata_value(trace.attributes, "sac.knetwk");
+    ids.station = metadata_value(trace.attributes, "sac.kstnm");
+    // SAC undefined KHOLE and a defined blank location are distinct.
+    const std::string_view hole{reinterpret_cast<const char*>(bytes.data() + 116 * 4), 8};
+    if (trim(hole.substr(0, hole.find('\0'))) != "-12345")
+        ids.location = metadata_value(trace.attributes, "sac.khole");
+    ids.channel = trace.name;
+    if (has_errors(edit_metadata(trace, ids))) {
+        for (auto [key, value] : {std::pair{"station.network", *ids.network},
+                                  {"station.code", *ids.station},
+                                  {"channel.code", *ids.channel},
+                                  {"station.location", ids.location.value_or("")}})
+            if (!value.empty())
+                trace.attributes[key] = value;
+    }
+    trace.attributes["source.identity"] = "SAC character headers";
+    trace.attributes["source.sample_type"] = "SAC float32";
+    if (const auto ref = sac_start(bytes, little, 0.0)) {
+        trace.attributes["sac.reference_utc"] = timestamp(*ref);
+        const auto iztype = integer(bytes, 87, little);
+        if (iztype >= 5 && iztype <= 22)
+            trace.attributes["sac.iztype"] = std::to_string(iztype);
+    }
+    for (const auto& f : numeric_fields) {
+        const double value =
+            f.footer >= 0 ? precise(f.word, static_cast<std::size_t>(f.footer)) : real(bytes, f.word, little);
+        if (value != undefined_float && value >= f.low && value <= f.high)
+            trace.attributes[f.key] = number(value);
     }
     result.data.attributes["sac.nvhdr"] = std::to_string(version);
     result.data.attributes["sac.byte_order"] = little ? "little-endian" : "big-endian";
@@ -273,7 +318,7 @@ ReadResult read_sac(std::span<const std::byte> bytes, FormatId format, const Tex
     return result;
 }
 
-WriteResult write_sac(const Trace& trace, FormatId) {
+WriteResult write_sac(const Trace& trace, const WriteOptions& options) {
     using namespace std::chrono;
     WriteResult result;
     if (!trace.dt_seconds)
@@ -284,6 +329,11 @@ WriteResult write_sac(const Trace& trace, FormatId) {
     if (has_errors(result.diagnostics))
         return result;
 
+    const int version = options.sac_version.value_or(7);
+    if (version != 6 && version != 7) {
+        error(result.diagnostics, "sac", "SAC version must be 6 or 7");
+        return result;
+    }
     double begin = trace.relative_start_seconds.value_or(0.0);
     std::optional<sys_time<milliseconds>> reference;
     if (trace.start_time) {
@@ -306,9 +356,30 @@ WriteResult write_sac(const Trace& trace, FormatId) {
         return result;
     }
 
+    if (trace.samples.size() > 1 && (begin + dt <= begin || end - dt >= end)) {
+        error(result.diagnostics, "sac", "B and E cannot distinguish adjacent samples");
+        return result;
+    }
+    if (version == 6) {
+        const double b = static_cast<float>(begin), d = static_cast<float>(dt), e = static_cast<float>(end);
+        const double last = std::fma(double(trace.samples.size() - 1), d, b);
+        if (b == undefined_float || e == undefined_float ||
+            std::max({std::abs(b - begin), std::abs(e - end), std::abs(last - end)}) > dt / 16) {
+            error(result.diagnostics, "sac", "float32 timing exceeds 1/16 sample; use SAC v7");
+            return result;
+        }
+        if (b != begin || d != dt || e != end)
+            warn(result.diagnostics, "sac", "v6 B/DELTA/E rounded to float32");
+    }
+    const bool undefined_origin =
+        !trace.relative_start_seconds && !trace.start_time && trace.attributes.contains("sac.begin_undefined");
+    if (undefined_origin) {
+        if (auto original = parse_utc(metadata_value(trace.attributes, "sac.reference_utc")))
+            reference = time_point_cast<milliseconds>(*original);
+    }
     const auto footer = (header_words + trace.samples.size()) * 4;
     auto& bytes = result.bytes;
-    bytes.resize(footer + footer_words * 8);
+    bytes.resize(footer + (version == 7 ? footer_words * 8 : 0));
     const auto set_int = [&](std::size_t word, std::int32_t value) {
         put(std::span{bytes}, word * 4, std::bit_cast<std::uint32_t>(value));
     };
@@ -326,21 +397,27 @@ WriteResult write_sac(const Trace& trace, FormatId) {
     for (std::size_t word = 110; word < header_words; word += word == 112 ? 4 : 2)
         set_text(word, word == 112 ? 16 : 8, "-12345");
 
-    set_int(version_word, 7);
+    set_int(version_word, version);
     set_int(npts_word, static_cast<std::int32_t>(trace.samples.size()));
     set_int(type_word, time_series);
-    set_int(dependent_word, dependent_code(trace.quantity));
+    const bool standard = trace.unit == Unit::Nm || trace.unit == Unit::Nmps || trace.unit == Unit::Nmps2;
+    set_int(dependent_word, standard ? dependent_code(quantity_for(trace.unit)) : unknown_dependent);
+    if (trace.quantity != Quantity::Unknown && !standard)
+        warn(result.diagnostics, "sac", "engineering scale retained; IDEP written as IUNKN");
     set_int(even_word, 1);
     for (std::size_t word = 106; word <= 108; ++word)
         set_int(word, 0);
     set_float(delta_word, static_cast<float>(dt));
-    set_float(begin_word, static_cast<float>(begin));
-    set_float(end_word, static_cast<float>(end));
+    set_float(begin_word, undefined_origin ? undefined_float : static_cast<float>(begin));
+    set_float(end_word, undefined_origin ? undefined_float : static_cast<float>(end));
 
     if (reference) {
         const auto day = floor<days>(*reference);
         const year_month_day date{day};
         const hh_mm_ss clock{*reference - day};
+        if (metadata_value(trace.attributes, "sac.reference_utc") == timestamp(*reference))
+            if (auto iz = parse_index(metadata_value(trace.attributes, "sac.iztype")); iz && *iz <= 22)
+                set_int(87, static_cast<int>(*iz));
         set_int(70, int(date.year()));
         set_int(71, static_cast<std::int32_t>((day - sys_days{date.year()/January/1}).count() + 1));
         set_int(72, static_cast<std::int32_t>(clock.hours().count()));
@@ -348,19 +425,27 @@ WriteResult write_sac(const Trace& trace, FormatId) {
         set_int(74, static_cast<std::int32_t>(clock.seconds().count()));
         set_int(75, static_cast<std::int32_t>(clock.subseconds().count()));
     }
-    const auto label = trim(trace.name);
+    const auto label = metadata_value(trace.attributes, "channel.code");
     if (representable_label(label, 8)) {
         set_text(channel_word, 8, label);
-    } else if (!trace.name.empty()) {
+    } else if (!label.empty()) {
         warn(result.diagnostics, "sac", "KCMPNM requires an ASCII channel name of at most eight bytes");
     }
     std::size_t retained_attributes{};
     for (const auto& [key, word, width] : label_fields) {
-        const auto attribute = trace.attributes.find(std::string{key});
+        const auto effective = key == "sac.kstnm"    ? "station.code"
+                               : key == "sac.knetwk" ? "station.network"
+                               : key == "sac.khole"  ? "station.location"
+                                                     : key;
+        const auto attribute = trace.attributes.find(std::string{effective});
         if (attribute != trace.attributes.end() && representable_label(attribute->second, width)) {
             set_text(word, width, attribute->second);
             ++retained_attributes;
-        }
+        } else if (key == "sac.khole" && attribute != trace.attributes.end() && attribute->second.empty()) {
+            set_text(word, width, "");
+            ++retained_attributes;
+        } else if (attribute != trace.attributes.end() && !attribute->second.empty())
+            warn(result.diagnostics, "sac", "omitted unrepresentable " + std::string{key});
     }
 
     bool rounded = false;
@@ -375,15 +460,33 @@ WriteResult write_sac(const Trace& trace, FormatId) {
         rounded |= sample != original;
         set_float(header_words + i, sample);
     }
-    for (std::size_t i = 0; i < footer_words; ++i)
-        put(std::span{bytes}, footer + i * 8, std::bit_cast<std::uint64_t>(double{undefined_float}));
-    put(std::span{bytes}, footer, std::bit_cast<std::uint64_t>(dt));
-    put(std::span{bytes}, footer + 8, std::bit_cast<std::uint64_t>(begin));
-    put(std::span{bytes}, footer + 16, std::bit_cast<std::uint64_t>(end));
-
+    if (version == 7) {
+        for (std::size_t i = 0; i < footer_words; ++i)
+            put(std::span{bytes}, footer + i * 8, std::bit_cast<std::uint64_t>(double{undefined_float}));
+        put(std::span{bytes}, footer, std::bit_cast<std::uint64_t>(dt));
+        put(std::span{bytes}, footer + 8,
+            std::bit_cast<std::uint64_t>(undefined_origin ? double{undefined_float} : begin));
+        put(std::span{bytes}, footer + 16,
+            std::bit_cast<std::uint64_t>(undefined_origin ? double{undefined_float} : end));
+    }
+    for (const auto& f : numeric_fields) {
+        const auto v = parse_number(metadata_value(trace.attributes, f.key));
+        if (!v || *v == undefined_float || *v < f.low || *v > f.high)
+            continue;
+        set_float(f.word, static_cast<float>(*v));
+        if (version == 7 && f.footer >= 0)
+            put(std::span{bytes}, footer + static_cast<unsigned>(f.footer) * 8, std::bit_cast<std::uint64_t>(*v));
+    }
+    const auto bounds = std::minmax_element(trace.samples.begin(), trace.samples.end());
+    set_float(1, static_cast<float>(*bounds.first));
+    set_float(2, static_cast<float>(*bounds.second));
+    double mean = 0;
+    for (double x : trace.samples)
+        mean += static_cast<float>(x) / double(trace.samples.size());
+    set_float(56, static_cast<float>(mean));
     if (rounded)
         warn(result.diagnostics, "sac", "SAC waveform samples were rounded to float32");
-    if (trace.unit != Unit::Unknown)
+    if (!standard && trace.unit != Unit::Unknown)
         warn(result.diagnostics, "sac", "engineering unit is not encoded. Sample magnitudes retain their original scale");
     if (trace.quantity == Quantity::Counts)
         warn(result.diagnostics, "sac", "IDEP does not encode digital counts");

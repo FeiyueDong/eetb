@@ -13,13 +13,49 @@
 namespace gmtools {
 namespace {
 
-Quantity quantity_for(Unit unit) {
-    if (unit == Unit::Unknown)
-        return Quantity::Unknown;
-    return unit == Unit::Counts ? Quantity::Counts : Quantity::Acceleration;
+struct UnitInfo {
+    Unit unit;
+    Quantity quantity;
+    std::string_view label;
+    double si;
+    std::string_view aliases;
+};
+constexpr UnitInfo unit_table[] = {
+    {Unit::Unknown, Quantity::Unknown, "unknown", 0, ""},
+    {Unit::Counts, Quantity::Counts, "counts", 0, "|count|"},
+    {Unit::G, Quantity::Acceleration, "g", 9.80665, ""},
+    {Unit::Mps2, Quantity::Acceleration, "m/s²", 1, "|m/s2|m/s^2|m/s/s|m/sec/sec|"},
+    {Unit::Cmps2, Quantity::Acceleration, "cm/s²", .01, "|cm/s2|cm/s^2|cm/s/s|gal|cm/sec/sec|"},
+    {Unit::Nmps2, Quantity::Acceleration, "nm/s²", 1e-9, "|nm/s2|nm/s^2|nm/s/s|"},
+    {Unit::Mps, Quantity::Velocity, "m/s", 1, "|m/sec|"},
+    {Unit::Cmps, Quantity::Velocity, "cm/s", .01, "|cm/sec|"},
+    {Unit::Mmps, Quantity::Velocity, "mm/s", .001, "|mm/sec|"},
+    {Unit::Nmps, Quantity::Velocity, "nm/s", 1e-9, "|nm/sec|"},
+    {Unit::M, Quantity::Displacement, "m", 1, ""},
+    {Unit::Cm, Quantity::Displacement, "cm", .01, ""},
+    {Unit::Mm, Quantity::Displacement, "mm", .001, ""},
+    {Unit::Nm, Quantity::Displacement, "nm", 1e-9, ""},
+};
+const UnitInfo& info(Unit unit) {
+    for (const auto& item : unit_table)
+        if (item.unit == unit)
+            return item;
+    return unit_table[0];
 }
-
 } // namespace
+
+Quantity quantity_for(Unit unit) { return info(unit).quantity; }
+std::vector<Unit> units() {
+    std::vector<Unit> result;
+    for (const auto& item : unit_table)
+        result.push_back(item.unit);
+    return result;
+}
+std::optional<double> unit_factor(Unit from, Unit to) {
+    if (!info(from).si || quantity_for(from) != quantity_for(to))
+        return {};
+    return info(from).si / info(to).si;
+}
 
 std::optional<double> Trace::sample_span() const {
     if (dt_seconds && !samples.empty())
@@ -44,16 +80,7 @@ std::string_view name(Quantity quantity) {
     return "unknown";
 }
 
-std::string_view name(Unit unit) {
-    switch (unit) {
-    case Unit::Unknown: return "unknown";
-    case Unit::G: return "g";
-    case Unit::Mps2: return "m/s²";
-    case Unit::Cmps2: return "cm/s²";
-    case Unit::Counts: return "counts";
-    }
-    return "unknown";
-}
+std::string_view name(Unit unit) { return info(unit).label; }
 
 std::optional<Quantity> quantity_from_name(std::string_view value) {
     const auto word = detail::lower(detail::trim(value));
@@ -67,14 +94,11 @@ std::optional<Quantity> quantity_from_name(std::string_view value) {
 
 std::optional<Unit> unit_from_name(std::string_view value) {
     const auto word = detail::lower(detail::trim(value));
-    if (word == "m/s2" || word == "m/s^2")
-        return Unit::Mps2;
-    if (word == "cm/s2" || word == "cm/s^2" || word == "gal")
-        return Unit::Cmps2;
-    for (const auto unit : {Unit::Unknown, Unit::G, Unit::Mps2, Unit::Cmps2, Unit::Counts}) {
-        if (word == name(unit))
-            return unit;
-    }
+    if (word.empty() || word.find('|') != word.npos)
+        return {};
+    for (const auto& item : unit_table)
+        if (word == item.label || item.aliases.find("|" + word + "|") != item.aliases.npos)
+            return item.unit;
     return {};
 }
 
@@ -87,6 +111,12 @@ std::optional<double> parse_number(std::string_view word) {
     }
     if (word.empty())
         return {};
+    std::string normalized;
+    if (const auto exp = word.find_first_of("dD"); exp != word.npos) {
+        normalized = word;
+        normalized[exp] = 'e';
+        word = normalized;
+    }
     double value{};
     const auto end = word.data() + word.size();
     const auto parsed = std::from_chars(word.data(), end, value, std::chars_format::general);
@@ -141,18 +171,18 @@ std::string describe(const Diagnostic& d) {
 
 std::string timestamp(TimePoint time) {
     using namespace std::chrono;
-    const auto day = floor<days>(time);
+    const auto whole = floor<seconds>(time);
+    const auto day = floor<days>(whole);
     const year_month_day date{day};
-    const hh_mm_ss clock{time - day};
+    const hh_mm_ss clock{whole - day};
+    const auto rem = time.time_since_epoch().count() % 1'000'000'000;
+    const auto fraction = rem < 0 ? rem + 1'000'000'000 : rem;
     std::ostringstream out;
     out.imbue(std::locale::classic());
-    out << std::setfill('0') << std::setw(4) << int(date.year()) << '-'
-        << std::setw(2) << unsigned(date.month()) << '-'
-        << std::setw(2) << unsigned(date.day()) << 'T'
-        << std::setw(2) << clock.hours().count() << ':'
-        << std::setw(2) << clock.minutes().count() << ':'
-        << std::setw(2) << clock.seconds().count() << '.'
-        << std::setw(9) << clock.subseconds().count() << 'Z';
+    out << std::setfill('0') << std::setw(4) << int(date.year()) << '-' << std::setw(2) << unsigned(date.month())
+        << '-' << std::setw(2) << unsigned(date.day()) << 'T' << std::setw(2) << clock.hours().count() << ':'
+        << std::setw(2) << clock.minutes().count() << ':' << std::setw(2) << clock.seconds().count() << '.'
+        << std::setw(9) << fraction << 'Z';
     return out.str();
 }
 
@@ -176,15 +206,20 @@ Diagnostics apply_overrides(Trace& trace, const Overrides& user) {
         quantity = quantity_for(unit);
     if (!detail::compatible(quantity, unit))
         detail::error(diagnostics, "override", "physical quantity and unit are incompatible");
+    if (const auto locked = trace.attributes.find("calibration.applied_unit");
+        locked != trace.attributes.end() && (name(unit) != locked->second || quantity != quantity_for(unit)))
+        detail::error(diagnostics, "override",
+                      "input labels conflict with applied calibration; use output-unit to convert");
     const auto original_counts = [&](const char* key) {
         const auto current = trace.attributes.find(key);
         return current != trace.attributes.end() && current->second == "counts";
     };
     const bool from_counts = trace.quantity == Quantity::Counts || trace.unit == Unit::Counts ||
         original_counts("source.original_quantity") || original_counts("source.original_unit");
-    if (from_counts && (quantity == Quantity::Acceleration || quantity == Quantity::Velocity ||
-        quantity == Quantity::Displacement || quantity_for(unit) == Quantity::Acceleration) &&
-        !trace.attributes.contains("text.numeric_factor")) {
+    if (from_counts &&
+        (quantity == Quantity::Acceleration || quantity == Quantity::Velocity ||
+         quantity == Quantity::Displacement || unit_factor(unit, unit).has_value()) &&
+        !trace.attributes.contains("calibration.applied_unit")) {
         detail::error(diagnostics, "override", "known digital counts need an explicit calibration factor before assigning a physical quantity");
     }
     const auto effective_dt = dt ? dt : trace.dt_seconds;
@@ -227,6 +262,80 @@ Diagnostics apply_overrides(Trace& trace, const Overrides& user) {
 }
 
 namespace detail {
+
+Diagnostics process_read(Trace& trace, const ReadOptions& opts) {
+    Diagnostics ds;
+    auto& attrs = trace.attributes;
+    const bool knet = attrs.contains("knet.scale_factor_cmps2_per_count");
+    const bool modified = attrs.contains("modified.sensitivity");
+    std::optional<double> calibration;
+    std::optional<Unit> target;
+    if (opts.calibration == Calibration::Manual) {
+        calibration = opts.calibration_factor;
+        target = opts.calibration_unit;
+        if (trace.unit != Unit::Counts && trace.quantity != Quantity::Counts &&
+            !(trace.unit == Unit::Unknown && trace.quantity == Quantity::Unknown &&
+              (opts.overrides.unit == Unit::Counts || opts.overrides.quantity == Quantity::Counts)))
+            error(ds, "calibration", "manual calibration requires known counts or explicit counts input");
+        if (!target || !unit_factor(*target, *target) || !calibration || !std::isfinite(*calibration) ||
+            !*calibration)
+            error(ds, "calibration", "manual calibration requires a nonzero factor and physical unit per count");
+    } else if (opts.calibration_factor || opts.calibration_unit) {
+        error(ds, "calibration", "factor and calibration unit require manual calibration mode");
+    } else if (opts.calibration == Calibration::Source && modified) {
+        const auto sensitivity = parse_number(attrs.at("modified.sensitivity"));
+        target = unit_from_name(attrs.at("modified.si_unit"));
+        if (attrs.at("modified.dimension") == "dimensionless" && sensitivity && positive(*sensitivity))
+            warn(ds, "calibration", "dimensionless auxiliary channel retained as raw counts");
+        else if (!sensitivity || !positive(*sensitivity) || !target || !unit_factor(*target, *target))
+            error(ds, "calibration", "source sensitivity or physical dimension is undefined");
+        else
+            calibration = 100.0 / *sensitivity;
+    } else if (opts.calibration == Calibration::Source && !knet) {
+        error(ds, "calibration", "this format has no supported source calibration");
+    } else if (opts.calibration == Calibration::Raw && knet) {
+        error(ds, "calibration", "K-NET requires its declared Scale Factor");
+    }
+    const auto factor = opts.text.numeric_factor;
+    if (factor && (!std::isfinite(*factor) || !*factor))
+        error(ds, "scaling", "numeric factor must be finite and nonzero");
+    if (has_errors(ds))
+        return ds;
+    if (calibration || factor) {
+        for (auto& sample : trace.samples) {
+            const double calibrated = sample * calibration.value_or(1.0);
+            const double scaled = calibrated * factor.value_or(1.0);
+            if (!std::isfinite(calibrated) || !std::isfinite(scaled) || (sample && !scaled)) {
+                error(ds, "scaling", "sample exceeds numeric range during calibration or user scaling");
+                return ds;
+            }
+            sample = scaled;
+        }
+    }
+    auto overrides = opts.overrides;
+    if (calibration) {
+        attrs["source.original_unit"] = attrs["source.original_quantity"] = "counts";
+        attrs["calibration.source"] =
+            modified && opts.calibration == Calibration::Source ? "Modified miniSEED" : "manual";
+        attrs["calibration.factor"] = number(*calibration);
+        attrs["calibration.applied_unit"] = name(*target);
+        trace.unit = *target;
+        trace.quantity = quantity_for(*target);
+        if (opts.calibration == Calibration::Manual) {
+            if (overrides.unit == Unit::Counts)
+                overrides.unit.reset();
+            if (overrides.quantity == Quantity::Counts)
+                overrides.quantity.reset();
+        }
+    }
+    if (factor) {
+        attrs["text.numeric_factor"] = number(*factor); // retained for Profile v1 consumers
+        attrs["source.numeric_factor"] = "user scaling after calibration";
+    }
+    auto diagnostics = apply_overrides(trace, overrides);
+    ds.insert(ds.end(), diagnostics.begin(), diagnostics.end());
+    return ds;
+}
 
 std::string_view trim(std::string_view value) {
     const auto first = value.find_first_not_of(" \t\r\n");
@@ -275,23 +384,7 @@ bool positive(double value) {
 bool compatible(Quantity quantity, Unit unit) {
     if (quantity == Quantity::Unknown || unit == Unit::Unknown)
         return true;
-    return unit == Unit::Counts ? quantity == Quantity::Counts : quantity == Quantity::Acceleration;
-}
-
-std::optional<double> acceleration_factor(Unit input, Unit output) {
-    const auto in_si = [](Unit unit) -> std::optional<double> {
-        switch (unit) {
-        case Unit::G: return 9.80665;
-        case Unit::Mps2: return 1.0;
-        case Unit::Cmps2: return 0.01;
-        default: return {};
-        }
-    };
-    const auto from = in_si(input);
-    const auto to = in_si(output);
-    if (!from || !to)
-        return {};
-    return *from / *to;
+    return quantity == quantity_for(unit);
 }
 
 void error(Diagnostics& diagnostics, std::string source, std::string message,

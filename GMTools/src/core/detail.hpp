@@ -9,7 +9,7 @@
 namespace gmtools::detail {
 
 using Reader = ReadResult (*)(std::span<const std::byte>, FormatId, const TextParseOptions&);
-using Writer = WriteResult (*)(const Trace&, FormatId);
+using Writer = WriteResult (*)(const Trace&, const WriteOptions&);
 using Detector = bool (*)(std::span<const std::byte>);
 enum class TextSampleKind { FloatingPoint, IntegerCounts };
 
@@ -22,7 +22,13 @@ bool positive(double value);
 bool compatible(Quantity quantity, Unit unit);
 void save_text_file(const std::filesystem::path& path, std::string_view text, bool overwrite,
                     const std::filesystem::path& protected_input, Diagnostics& diagnostics);
-std::optional<double> acceleration_factor(Unit input, Unit output);
+void import_sid(Metadata& attributes, std::string_view sid);
+bool valid_sid(std::string_view sid, bool v2);
+std::string metadata_value(const Metadata&, const std::string& key);
+Diagnostics process_read(Trace&, const ReadOptions&);
+bool detect_modified(std::span<const std::byte>);
+ReadResult read_modified(std::span<const std::byte>, FormatId, const TextParseOptions&);
+FormatId peer_family(std::span<const std::byte>);
 void error(Diagnostics& diagnostics, std::string source, std::string message,
            std::size_t line = 0, std::size_t column = 0);
 void warn(Diagnostics& diagnostics, std::string source, std::string message,
@@ -33,20 +39,19 @@ std::optional<FormatId> detect_text_table(std::string_view);
 TextSuggestion suggest_text_options(std::string_view, FormatId, const ReadOptions&);
 ReadResult parse_text(std::string_view, FormatId, const TextParseOptions&,
                       TextSampleKind = TextSampleKind::FloatingPoint);
-WriteResult write_text(const Trace&, FormatId);
-bool detect_peer(std::span<const std::byte>);
+WriteResult write_text(const Trace&, const WriteOptions&);
 ReadResult read_peer(std::span<const std::byte>, FormatId, const TextParseOptions&);
-WriteResult write_peer(const Trace&, FormatId);
+WriteResult write_peer(const Trace&, const WriteOptions&);
 bool detect_knet(std::span<const std::byte>);
 ReadResult read_knet(std::span<const std::byte>, FormatId, const TextParseOptions&);
 Diagnostics validate_knet_overrides(const Trace&, const Overrides&);
 bool detect_sac(std::span<const std::byte>);
 ReadResult read_sac(std::span<const std::byte>, FormatId, const TextParseOptions&);
-WriteResult write_sac(const Trace&, FormatId);
+WriteResult write_sac(const Trace&, const WriteOptions&);
 bool detect_mseed(std::span<const std::byte>);
 #ifdef GMTOOLS_HAVE_LIBMSEED
 ReadResult read_mseed(std::span<const std::byte>, FormatId, const TextParseOptions&);
-WriteResult write_mseed(const Trace&, FormatId);
+WriteResult write_mseed(const Trace&, const WriteOptions&);
 #endif
 
 } // namespace gmtools::detail

@@ -12,9 +12,9 @@
 
 namespace gmtools {
 
-enum class FormatId { Auto, Text, Dat, Csv, Tsv, At2, Sac, Mseed, Mseed2, KnetAscii };
+enum class FormatId { Auto, Text, Dat, Csv, Tsv, At2, Sac, Mseed, Mseed2, KnetAscii, ModifiedMseed, Vt2, Dt2 };
 enum class Quantity { Unknown, Acceleration, Velocity, Displacement, Counts };
-enum class Unit { Unknown, G, Mps2, Cmps2, Counts };
+enum class Unit { Unknown, G, Mps2, Cmps2, Counts, Nmps2, Mps, Cmps, Mmps, Nmps, M, Cm, Mm, Nm };
 enum class Severity { Warning, Error };
 enum class Layout { Sequential, Columnar };
 enum class Delimiter { Auto, Whitespace, Comma, Tab };
@@ -69,11 +69,27 @@ struct Overrides {
     std::optional<Unit> unit;
 };
 
+// An absent edit keeps the field. An empty string clears it (empty location is valid).
+struct MetadataEdit {
+    std::optional<std::string> start_utc, relative_start;
+    std::optional<std::string> network, station, location, channel, source_id;
+    bool clear_location{}; // distinguish unknown from a known empty location code
+    bool has_identity() const;
+};
+
+enum class Calibration { Default, Raw, Source, Manual };
+
 struct ReadOptions {
     FormatId format{FormatId::Auto};
     TextParseOptions text;
     Overrides overrides;
     std::string extension_hint;
+    Calibration calibration{Calibration::Default};
+    std::optional<double> calibration_factor; // physical units per count
+    std::optional<Unit> calibration_unit;
+    MetadataEdit metadata;
+    std::optional<std::size_t> selected_channel; // 1-based
+    std::optional<bool> sac_standard_units;
 };
 
 struct ProfileResult {
@@ -93,9 +109,19 @@ struct ReadResult {
     std::size_t first_data_line{};
 };
 
+enum class TextHeader { None, Columns, Metadata };
+enum class MseedEncoding { Float64, Float32, Int32, Steim2 };
+
 struct WriteOptions {
     FormatId format{FormatId::Text};
     std::optional<Unit> output_unit;
+    std::optional<bool> text_time_values;
+    std::optional<TextHeader> text_header;
+    std::optional<Delimiter> text_delimiter;
+    std::optional<std::size_t> precision;
+    std::optional<int> sac_version;
+    std::optional<bool> sac_standard_units;
+    std::optional<MseedEncoding> mseed_encoding;
 };
 
 struct WriteResult {
@@ -146,6 +172,11 @@ std::optional<std::vector<std::size_t>> parse_indices(std::string_view list);
 bool has_errors(const Diagnostics& diagnostics);
 std::string describe(const Diagnostic& diagnostic);
 std::string timestamp(TimePoint time);
+std::optional<TimePoint> parse_utc(std::string_view text);
+Quantity quantity_for(Unit unit);
+std::vector<Unit> units();
+std::optional<double> unit_factor(Unit from, Unit to);
+Diagnostics edit_metadata(Trace& trace, const MetadataEdit& edit);
 
 InputFile load_file(const std::filesystem::path& path);
 std::optional<std::string_view> text_view(std::span<const std::byte> bytes);

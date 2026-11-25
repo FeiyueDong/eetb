@@ -2,6 +2,7 @@
 
 #include "ui_helpers.hpp"
 
+#include <algorithm>
 #include <QComboBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -30,9 +31,20 @@ public:
         form->addRow(QStringLiteral("Quantity"), quantity_);
 
         unit_ = new QComboBox;
-        unit_->addItem(keep);
-        for (const auto value : {Unit::Unknown, Unit::G, Unit::Mps2, Unit::Cmps2, Unit::Counts})
-            unit_->addItem(as_text(name(value)), static_cast<int>(value));
+        const auto update_units = [this, keep] {
+            const auto previous = unit_->currentData();
+            const auto selected = quantity_->currentData();
+            unit_->clear();
+            unit_->addItem(keep);
+            for (auto unit : units()) {
+                if (!selected.isValid() || selected.toInt() == static_cast<int>(Quantity::Unknown) ||
+                    unit == Unit::Unknown || selected.toInt() == static_cast<int>(quantity_for(unit)))
+                    unit_->addItem(as_text(name(unit)), static_cast<int>(unit));
+            }
+            unit_->setCurrentIndex(std::max(0, unit_->findData(previous)));
+        };
+        QObject::connect(quantity_, &QComboBox::currentIndexChanged, unit_, update_units);
+        update_units();
         form->addRow(QStringLiteral("Input unit"), unit_);
         unit_->setToolTip(QStringLiteral("Assign the unit of the existing samples. This does not convert their values."));
         sampling_->setAccessibleName(QStringLiteral("Sampling interval or rate"));

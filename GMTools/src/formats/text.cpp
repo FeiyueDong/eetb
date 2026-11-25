@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <set>
 
 namespace gmtools {
@@ -151,7 +152,7 @@ std::vector<std::string> table_labels(std::string_view line, Delimiter delimiter
 
 struct LabelMeaning {
     bool time_seconds{};
-    std::optional<Unit> acceleration_unit;
+    std::optional<Unit> physical_unit;
 };
 
 LabelMeaning meaning(std::string_view label) {
@@ -165,9 +166,9 @@ LabelMeaning meaning(std::string_view label) {
     const auto unit = trim(word.substr(open + 1, word.size() - open - 2));
     if ((kind == "time" || kind == "t") && unit == "s")
         return {true, {}};
-    if (kind == "acceleration" || kind == "accel") {
+    if (auto quantity = quantity_from_name(kind == "accel" ? "acceleration" : kind)) {
         const auto parsed = unit_from_name(unit);
-        if (parsed == Unit::G || parsed == Unit::Mps2 || parsed == Unit::Cmps2)
+        if (parsed && unit_factor(*parsed, *parsed) && quantity_for(*parsed) == quantity)
             return {false, parsed};
     }
     return {};
@@ -349,32 +350,119 @@ TextSuggestion suggest_text_options(std::string_view text, FormatId format, cons
     }
     const bool unresolved_time_labels = !time_labels.empty() &&
         (!time_column || time_labels.size() != 1 || time_labels.front() != *time_column);
-    const auto shared_unit = selected.empty() ? std::nullopt : semantics[selected.front() - 1].acceleration_unit;
+    const auto shared_unit = selected.empty() ? std::nullopt : semantics[selected.front() - 1].physical_unit;
     const bool uniform_units = shared_unit && std::ranges::all_of(selected, [&](auto index) {
-        return semantics[index - 1].acceleration_unit == shared_unit;
-    });
-    if (!current.overrides.unit && !uniform_units && std::ranges::any_of(selected, [&](auto index) {
-            return semantics[index - 1].acceleration_unit.has_value();
-        }))
-        warn(result.diagnostics, "suggestion", "selected data columns do not share one declared acceleration unit",
+                                   return semantics[index - 1].physical_unit == shared_unit;
+                               });
+    if (!current.overrides.unit && !uniform_units &&
+        std::ranges::any_of(selected, [&](auto index) { return semantics[index - 1].physical_unit.has_value(); }))
+        warn(result.diagnostics, "suggestion", "selected data columns do not share one declared physical unit",
              header_line);
     if (!set.layout && !unresolved_time_labels && (result.options.text.time_column || uniform_units))
         result.options.text.layout = Layout::Columnar;
     if (uniform_units && !unresolved_time_labels &&
-        (!current.overrides.quantity || current.overrides.quantity == Quantity::Acceleration)) {
+        (!current.overrides.quantity || current.overrides.quantity == quantity_for(*shared_unit))) {
         if (!current.overrides.unit) {
             result.options.overrides.unit = shared_unit;
-            result.evidence.push_back("Input unit " + std::string{name(*shared_unit)} + " from acceleration column labels");
+            result.evidence.push_back("Input unit " + std::string{name(*shared_unit)} + " from data column labels");
         }
         if (!current.overrides.quantity &&
-            (!current.overrides.unit || compatible(Quantity::Acceleration, *current.overrides.unit)))
-            result.options.overrides.quantity = Quantity::Acceleration;
+            (!current.overrides.unit || compatible(quantity_for(*shared_unit), *current.overrides.unit)))
+            result.options.overrides.quantity = quantity_for(*shared_unit);
     }
     return result;
 }
 
 ReadResult read_text(std::span<const std::byte> bytes, FormatId format, const TextParseOptions& options) {
     const auto text = text_view(bytes);
+    if (text && text->starts_with("# GMTools waveform ")) {
+        ReadResult result;
+        try {
+            auto pop_line = [](std::string_view& tail) {
+                const auto end = tail.find('\n');
+                const auto line = trim(tail.substr(0, end));
+                tail = end == tail.npos ? std::string_view{} : tail.substr(end + 1);
+                return line;
+            };
+            auto tail = *text;
+            if (pop_line(tail) != "# GMTools waveform 1")
+                throw std::runtime_error("unknown waveform header version");
+            const auto header = pop_line(tail);
+            if (!header.starts_with("# "))
+                throw std::runtime_error("missing waveform metadata");
+            const auto meta = nlohmann::json::parse(header.substr(2));
+            TextParseOptions data;
+            const bool timed = meta.at("time_basis") == "elapsed";
+            if (!timed && meta.at("time_basis") != "values")
+                throw std::runtime_error("invalid time basis");
+            data.layout = Layout::Columnar;
+            data.first_line = 1;
+            auto delimiter = delimiter_from_name(meta.at("delimiter").get<std::string>());
+            if (!delimiter || *delimiter == Delimiter::Auto)
+                throw std::runtime_error("invalid delimiter");
+            data.delimiter = *delimiter;
+            if (timed)
+                data.time_column = 1;
+            if (pop_line(tail) != meta.at("columns").get<std::string>())
+                throw std::runtime_error("column header mismatch");
+            if (options.first_line || options.last_line || options.layout || options.time_column ||
+                !options.data_columns.empty() || options.delimiter != Delimiter::Auto)
+                throw std::runtime_error("explicit text layout conflicts with self-describing input");
+            result = parse_text(tail, format, data);
+            result.first_data_line = 4;
+            for (auto& d : result.diagnostics)
+                if (d.line)
+                    d.line += 3;
+            if (has_errors(result.diagnostics))
+                return result;
+            if (result.data.traces.size() != 1)
+                throw std::runtime_error("expected one amplitude column");
+            auto& trace = result.data.traces.front();
+            if (!meta.at("npts").is_number_unsigned() || meta.at("npts") != trace.samples.size())
+                throw std::runtime_error("NPTS disagrees with waveform");
+            if (timed && (trace.relative_start_seconds != 0 || !meta.contains("dt")))
+                throw std::runtime_error("elapsed time must start at zero with declared dt");
+            if (meta.contains("dt")) {
+                const auto dt = meta.at("dt").get<double>();
+                if (!positive(dt) || (trace.dt_seconds && std::abs(*trace.dt_seconds - dt) > dt * 1e-9))
+                    throw std::runtime_error("invalid dt or disagreement with time column");
+                trace.dt_seconds = dt;
+            }
+            trace.relative_start_seconds.reset();
+            if (meta.contains("relative_start"))
+                trace.relative_start_seconds = meta.at("relative_start").get<double>();
+            if (meta.contains("start_utc")) {
+                trace.start_time = parse_utc(meta.at("start_utc").get<std::string>());
+                if (!trace.start_time)
+                    throw std::runtime_error("invalid start UTC");
+            }
+            trace.name = meta.at("name").get<std::string>();
+            const auto unit = unit_from_name(meta.at("unit").get<std::string>());
+            const auto quantity = quantity_from_name(meta.at("quantity").get<std::string>());
+            if (!unit || !quantity || !compatible(*quantity, *unit))
+                throw std::runtime_error("invalid quantity or unit");
+            trace.unit = *unit;
+            trace.quantity = *quantity;
+            trace.attributes.clear();
+            for (const auto* key :
+                 {"station.network", "station.code", "station.location", "channel.code", "channel.source_id"})
+                if (meta.contains(key))
+                    trace.attributes[key] = meta.at(key).get<std::string>();
+            if (trace.attributes.contains("channel.source_id")) {
+                Metadata derived;
+                import_sid(derived, trace.attributes.at("channel.source_id"));
+                for (const auto& [key, value] : derived) {
+                    if (trace.attributes.contains(key) && trace.attributes.at(key) != value)
+                        throw std::runtime_error("SID and channel fields disagree");
+                    trace.attributes[key] = value;
+                }
+            }
+        } catch (const std::exception& e) {
+            result.data.traces.clear();
+            error(result.diagnostics, "text", e.what());
+        }
+        return result;
+    }
     if (text)
         return parse_text(*text, format, options);
     ReadResult result;
@@ -401,12 +489,6 @@ ReadResult parse_text(std::string_view text, FormatId format, const TextParseOpt
         error(result.diagnostics, "text", "column indices must be distinct and positive; time cannot be a data column");
         return result;
     }
-    const double factor = options.numeric_factor.value_or(1.0);
-    if (!std::isfinite(factor) || factor == 0.0) {
-        error(result.diagnostics, "text", "numeric factor must be finite and nonzero");
-        return result;
-    }
-
     const bool delimited_table = format == FormatId::Csv || format == FormatId::Tsv;
     const auto layout = options.layout.value_or(Layout::Columnar);
     if (layout == Layout::Sequential && (!selected.empty() || options.time_column)) {
@@ -510,28 +592,11 @@ ReadResult parse_text(std::string_view text, FormatId format, const TextParseOpt
         }
         if (options.time_column)
             time.rows.emplace_back(numbers[*options.time_column - 1], row + 1);
-        const auto append = [&](Trace& trace, std::size_t column) {
-            const double original = numbers[column];
-            const double sample = original * factor;
-            if (!std::isfinite(sample) || (original != 0.0 && sample == 0.0)) {
-                error(result.diagnostics, "text", "sample is out of range after applying the numeric factor",
-                      row + 1, column + 1);
-                return false;
-            }
-            trace.samples.push_back(sample);
-            return true;
-        };
-        if (layout == Layout::Sequential) {
-            for (std::size_t c = 0; c < numbers.size(); ++c) {
-                if (!append(traces.front(), c))
-                    return result;
-            }
-        } else {
-            for (std::size_t i = 0; i < data_columns.size(); ++i) {
-                if (!append(traces[i], data_columns[i] - 1))
-                    return result;
-            }
-        }
+        if (layout == Layout::Sequential)
+            traces.front().samples.insert(traces.front().samples.end(), numbers.begin(), numbers.end());
+        else
+            for (std::size_t i = 0; i < data_columns.size(); ++i)
+                traces[i].samples.push_back(numbers[data_columns[i] - 1]);
     }
     if (traces.empty()) {
         error(result.diagnostics, "text", "no numeric samples after the header", first);
@@ -548,35 +613,81 @@ ReadResult parse_text(std::string_view text, FormatId format, const TextParseOpt
             if (step)
                 trace.attributes["source.dt"] = "text time column (seconds)";
         }
-        if (options.numeric_factor) {
-            trace.attributes["text.numeric_factor"] = number(factor);
-            trace.attributes["source.numeric_factor"] = "user input; applied to sample values";
-        }
     }
     result.data.traces = std::move(traces);
     return result;
 }
 
-WriteResult write_text(const Trace& trace, FormatId format) {
+WriteResult write_text(const Trace& trace, const WriteOptions& options) {
     WriteResult result;
+    const auto format = options.format;
+    const auto fixed = format == FormatId::Csv   ? Delimiter::Comma
+                       : format == FormatId::Tsv ? Delimiter::Tab
+                                                 : Delimiter::Whitespace;
+    const bool table = format == FormatId::Csv || format == FormatId::Tsv;
+    const auto delimiter = options.text_delimiter.value_or(fixed);
+    const bool timed = options.text_time_values.value_or(false);
+    const auto header = options.text_header.value_or(table ? TextHeader::Columns : TextHeader::None);
+    if ((timed && !trace.dt_seconds) || delimiter == Delimiter::Auto || (table && fixed != delimiter) ||
+        (options.precision && (!*options.precision || *options.precision > 17))) {
+        error(result.diagnostics, "text",
+              "time columns require dt, CSV/TSV use their native delimiter, precision must be 1..17");
+        return result;
+    }
+    const char separator = delimiter == Delimiter::Comma ? ',' : delimiter == Delimiter::Tab ? '\t' : ' ';
+    std::string label = "amplitude";
+    const auto original = trim(trace.name);
+    if (is_column_label(original) && original.find_first_of(",\t\r\n") == original.npos && valid_text(original))
+        label = std::string{original};
+    if (timed || options.text_header || options.output_unit) {
+        label = trace.quantity == Quantity::Unknown ? "amplitude" : std::string{name(trace.quantity)};
+        if (trace.unit != Unit::Unknown)
+            label += "[" + std::string{name(trace.unit)} + "]";
+    }
+    const std::string columns = timed ? "Time[s]" + std::string(1, separator) + label : label;
     std::string output;
-    if (format == FormatId::Csv || format == FormatId::Tsv) {
-        const auto label = trim(trace.name);
-        output = is_column_label(label) && label.find_first_of(",\t\r\n") == label.npos &&
-                          valid_text(label)
-                     ? std::string{label} : "amplitude";
-        if (!trace.name.empty() && output != trace.name)
-            warn(result.diagnostics, "writer", "channel name cannot be represented as a plain column label");
-        output += '\n';
+    if (header == TextHeader::Metadata) {
+        nlohmann::json meta = {{"name", trace.name},
+                               {"npts", trace.samples.size()},
+                               {"unit", name(trace.unit)},
+                               {"quantity", name(trace.quantity)},
+                               {"delimiter", name(delimiter)},
+                               {"columns", columns},
+                               {"time_basis", timed ? "elapsed" : "values"}};
+        if (trace.dt_seconds)
+            meta["dt"] = *trace.dt_seconds;
+        if (trace.relative_start_seconds)
+            meta["relative_start"] = *trace.relative_start_seconds;
+        if (trace.start_time)
+            meta["start_utc"] = timestamp(*trace.start_time);
+        for (const auto* key :
+             {"station.network", "station.code", "station.location", "channel.code", "channel.source_id"})
+            if (trace.attributes.contains(key))
+                meta[key] = trace.attributes.at(key);
+        try {
+            output = "# GMTools waveform 1\n# " + meta.dump() + "\n";
+        } catch (const nlohmann::json::exception& e) {
+            error(result.diagnostics, "text", e.what());
+            return result;
+        }
+    } else if (trace.dt_seconds || trace.start_time || trace.relative_start_seconds ||
+               trace.unit != Unit::Unknown || !trace.attributes.empty()) {
+        warn(result.diagnostics, "text",
+             "plain output omits source metadata; use metadata header to retain timing and units");
     }
-    for (double sample : trace.samples) {
-        output += number(sample);
+    if (header != TextHeader::None)
+        output += columns + "\n";
+    for (std::size_t i = 0; i < trace.samples.size(); ++i) {
+        if (timed)
+            output += number(static_cast<double>(i) * *trace.dt_seconds) + separator;
+        if (options.precision) {
+            char buffer[64];
+            auto end = std::to_chars(buffer, buffer + sizeof buffer, trace.samples[i], std::chars_format::general,
+                                     static_cast<int>(*options.precision));
+            output.append(buffer, end.ptr);
+        } else
+            output += number(trace.samples[i]);
         output += '\n';
-    }
-    if (trace.dt_seconds || trace.relative_start_seconds || trace.start_time ||
-        trace.unit != Unit::Unknown || trace.quantity != Quantity::Unknown || !trace.attributes.empty() ||
-        ((format == FormatId::Text || format == FormatId::Dat) && !trace.name.empty())) {
-        warn(result.diagnostics, "writer", "plain text waveforms do not encode timing, quantity, unit or format metadata");
     }
     result.bytes = bytes_of(output);
     return result;

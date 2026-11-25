@@ -87,51 +87,6 @@ bool append_samples(Trace& trace, const MS3Record& record) {
     }
 }
 
-bool valid_sid(std::string_view sid, bool v2) {
-    if (!sid.starts_with("FDSN:") || sid.size() >= LM_SIDLEN)
-        return false;
-    sid.remove_prefix(5);
-    std::array<std::string_view, 6> codes;
-    for (std::size_t i = 0; i < codes.size(); ++i) {
-        const auto split = sid.find('_');
-        if ((split == sid.npos) != (i + 1 == codes.size()))
-            return false;
-        codes[i] = sid.substr(0, split);
-        if (split != sid.npos)
-            sid.remove_prefix(split + 1);
-    }
-    if (codes[0].empty() || codes[1].empty() || codes[3].size() != 1 ||
-        codes[4].empty() || codes[2] == "--" || codes[0].size() > 8 ||
-        codes[1].size() > 8 || codes[2].size() > 8)
-        return false;
-    if (v2 && (codes[0].size() > 2 || codes[1].size() > 5 || codes[2].size() > 2 ||
-               codes[4].size() != 1 || codes[5].size() != 1))
-        return false;
-    for (std::size_t i = 0; i < codes.size(); ++i) {
-        if (!std::ranges::all_of(codes[i], [allow_dash = i == 1 || i == 2](char c) {
-            return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || (allow_dash && c == '-');
-        }))
-            return false;
-    }
-    return true;
-}
-
-std::string output_sid(const Trace& trace) {
-    if (trace.name.starts_with("FDSN:"))
-        return trace.name;
-    const auto value = [&](std::string_view key) {
-        const auto item = trace.attributes.find(std::string{key});
-        return item == trace.attributes.end() ? std::string{} : item->second;
-    };
-    const auto station = value("sac.kstnm");
-    const auto network = value("sac.knetwk");
-    if (!station.empty() && !network.empty() && trace.name.size() == 3) {
-        return "FDSN:" + network + '_' + station + '_' + value("sac.khole") + '_' +
-               trace.name[0] + '_' + trace.name[1] + '_' + trace.name[2];
-    }
-    return {};
-}
-
 } // namespace
 
 ReadResult read_mseed(std::span<const std::byte> bytes, FormatId format, const TextParseOptions&) {
@@ -224,6 +179,9 @@ ReadResult read_mseed(std::span<const std::byte> bytes, FormatId format, const T
             }
             auto& trace = traces.emplace_back();
             trace.name = sid;
+            import_sid(trace.attributes, sid);
+            trace.attributes["mseed.source_id"] = sid;
+            trace.attributes["source.sample_type"] = ms_encodingstr(rec.encoding);
             trace.start_time = TimePoint{std::chrono::nanoseconds{rec.starttime}};
             trace.dt_seconds = dt;
             trace.attributes["source.dt"] = "miniSEED rate or period";
@@ -251,10 +209,10 @@ ReadResult read_mseed(std::span<const std::byte> bytes, FormatId format, const T
     return result;
 }
 
-WriteResult write_mseed(const Trace& trace, FormatId format) {
+WriteResult write_mseed(const Trace& trace, const WriteOptions& options) {
     WriteResult result;
-    const bool v2 = format == FormatId::Mseed2;
-    const auto sid = output_sid(trace);
+    const bool v2 = options.format == FormatId::Mseed2;
+    const auto sid = metadata_value(trace.attributes, "channel.source_id");
     if (!valid_sid(sid, v2))
         error(result.diagnostics, "miniseed", v2 ? "miniSEED 2 requires an FDSN source identifier that fits SEED 2 NSLC codes" :
                                                   "miniSEED 3 requires an FDSN source identifier");
@@ -280,6 +238,43 @@ WriteResult write_mseed(const Trace& trace, FormatId format) {
     record.encoding = DE_FLOAT64;
     record.sampletype = 'd';
     record.datasamples = const_cast<double*>(trace.samples.data()); // libmseed reads from this buffer.
+    std::vector<float> floats;
+    std::vector<std::int32_t> integers;
+    const auto encoding = options.mseed_encoding.value_or(MseedEncoding::Float64);
+    if (encoding == MseedEncoding::Float32) {
+        floats.reserve(trace.samples.size());
+        bool rounded = false;
+        for (const double x : trace.samples) {
+            if (std::abs(x) > std::numeric_limits<float>::max() || (x && static_cast<float>(x) == 0)) {
+                error(result.diagnostics, "miniseed", "sample exceeds FLOAT32 range");
+                return result;
+            }
+            floats.push_back(static_cast<float>(x));
+            rounded |= floats.back() != x;
+        }
+        if (rounded)
+            warn(result.diagnostics, "miniseed", "samples rounded to FLOAT32");
+        record.sampletype = 'f';
+        record.encoding = DE_FLOAT32;
+        record.datasamples = floats.data();
+    } else if (encoding == MseedEncoding::Int32 || encoding == MseedEncoding::Steim2) {
+        integers.reserve(trace.samples.size());
+        for (const double x : trace.samples) {
+            if (x != std::trunc(x) || x < INT32_MIN || x > INT32_MAX) {
+                error(result.diagnostics, "miniseed", "integer encoding requires exact int32 samples");
+                return result;
+            }
+            if (encoding == MseedEncoding::Steim2 && !integers.empty() &&
+                (x - integers.back() < -536870912 || x - integers.back() > 536870911)) {
+                error(result.diagnostics, "miniseed", "difference exceeds signed 30-bit Steim-2 range");
+                return result;
+            }
+            integers.push_back(static_cast<std::int32_t>(x));
+        }
+        record.sampletype = 'i';
+        record.encoding = encoding == MseedEncoding::Int32 ? DE_INT32 : DE_STEIM2;
+        record.datasamples = integers.data();
+    }
     record.numsamples = record.samplecnt = static_cast<std::int64_t>(trace.samples.size());
     std::ranges::copy(sid, record.sid);
 
@@ -291,51 +286,49 @@ WriteResult write_mseed(const Trace& trace, FormatId format) {
     char* chunk{};
     std::int32_t size{};
     int status{};
-    std::int64_t samples_in_v2_headers{};
-    std::uint64_t max_v2_residual{};
+    std::int64_t header_samples{};
+    std::uint64_t max_residual{};
     Record encoded_header;
     while ((status = msr3_pack_next(packer.value, &chunk, &size)) == 1) {
-        if (v2) {
-            // V2 quantizes both start time and rate. Verify their encoded
-            // representation and reject exports that would alter the time grid.
-            const auto parsed = msr3_parse(chunk, static_cast<std::uint64_t>(size),
-                                           &encoded_header.value, MSF_ATENDOFFILE, 0);
-            const auto expected = ms_sampletime(start, samples_in_v2_headers, record.samprate);
-            if (parsed || !encoded_header.value || !known_time(expected)) {
-                result.bytes.clear();
-                error(result.diagnostics, "miniseed", "could not verify the encoded miniSEED 2 timing header");
-                return result;
-            }
-            const auto& header = *encoded_header.value;
-            const auto encoded_dt = period(header);
-            const auto dt = *trace.dt_seconds;
-            const auto residual = distance(header.starttime, expected);
-            if (header.sid != sid || !positive(encoded_dt) ||
-                std::abs(encoded_dt - dt) > 8.0 * std::numeric_limits<double>::epsilon() * dt ||
-                !known_time(header.starttime) ||
-                (samples_in_v2_headers == 0 && residual != 0) ||
-                residual > timestamp_resolution(header) || static_cast<double>(residual) > dt * 1e9 / 16.0) {
-                result.bytes.clear();
-                error(result.diagnostics, "miniseed", "miniSEED 2 cannot preserve the source identifier or required timing; use miniSEED 3");
-                return result;
-            }
-            max_v2_residual = std::max(max_v2_residual, residual);
-            samples_in_v2_headers += header.samplecnt;
+        // Verify what was actually encoded, including the quantized v2 time grid.
+        const auto parsed =
+            msr3_parse(chunk, static_cast<std::uint64_t>(size), &encoded_header.value, MSF_ATENDOFFILE, 0);
+        const auto expected = ms_sampletime(start, header_samples, record.samprate);
+        if (parsed || !encoded_header.value || !known_time(expected)) {
+            result.bytes.clear();
+            error(result.diagnostics, "miniseed", "could not verify the encoded miniSEED timing header");
+            return result;
         }
+        const auto& header = *encoded_header.value;
+        const auto encoded_dt = period(header);
+        const auto dt = *trace.dt_seconds;
+        const auto residual = distance(header.starttime, expected);
+        if (header.flags != record.flags || header.formatversion != record.formatversion ||
+            header.encoding != record.encoding || header.samplecnt <= 0 ||
+            header.samplecnt > record.samplecnt - header_samples || header.sid != sid || !positive(encoded_dt) ||
+            std::abs(encoded_dt - dt) > 8.0 * std::numeric_limits<double>::epsilon() * dt ||
+            !known_time(header.starttime) || (header_samples == 0 && residual != 0) ||
+            residual > timestamp_resolution(header) || static_cast<double>(residual) > dt * 1e9 / 16.0) {
+            result.bytes.clear();
+            error(result.diagnostics, "miniseed",
+                  "encoded identifier, encoding or timing differs from the requested record");
+            return result;
+        }
+        max_residual = std::max(max_residual, residual);
+        header_samples += header.samplecnt;
         const auto bytes = std::as_bytes(std::span{chunk, static_cast<std::size_t>(size)});
         result.bytes.insert(result.bytes.end(), bytes.begin(), bytes.end());
     }
     std::int64_t packed{};
     msr3_pack_free(&packer.value, &packed);
-    if (status != 0 || packed != record.samplecnt || result.bytes.empty() ||
-        (v2 && samples_in_v2_headers != packed)) {
+    if (status != 0 || packed != record.samplecnt || result.bytes.empty() || header_samples != packed) {
         result.bytes.clear();
         error(result.diagnostics, "miniseed", "could not encode all waveform samples");
         return result;
     }
-    if (max_v2_residual != 0)
-        warn(result.diagnostics, "miniseed", "miniSEED 2 rounded a record timestamp by up to " +
-             std::to_string(max_v2_residual) + " ns");
+    if (max_residual != 0)
+        warn(result.diagnostics, "miniseed",
+             "miniSEED rounded a record timestamp by up to " + std::to_string(max_residual) + " ns");
     if (trace.unit != Unit::Unknown || trace.quantity != Quantity::Unknown || !trace.attributes.empty() ||
         trace.relative_start_seconds)
         warn(result.diagnostics, "miniseed", "engineering units, relative origin and extra metadata are not written");

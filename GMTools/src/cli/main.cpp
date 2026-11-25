@@ -23,15 +23,25 @@ void usage(std::ostream& out) {
     out << "Usage:\n"
            "  gmtools formats\n"
            "  gmtools info INPUT [read options]\n"
-           "  gmtools convert INPUT --to FORMAT -o PATH [read options] [--channel N] [--output-unit UNIT] [--overwrite]\n"
+           "  gmtools convert INPUT --to FORMAT -o PATH [read options] [--channel N] [--output-unit UNIT] "
+           "[--overwrite]\n"
            "Run gmtools formats for available targets, including the optional miniSEED 2 target.\n"
            "Read options:\n"
-           "  --format auto|text|dat|csv|tsv|at2|knet-ascii|sac|mseed\n"
+           "  --format auto|text|dat|csv|tsv|at2|vt2|dt2|knet-ascii|sac|mseed|modified-mseed\n"
            "  --profile FILE  apply a text JSON profile before explicit command options\n"
            "  --layout sequential|columnar  --delimiter auto|whitespace|comma|tab\n"
            "  --first-line N  --last-line N  --data-columns N[,N...]  --time-column N\n"
-           "  --dt SECONDS | --fs HZ  --input-unit g|m/s2|cm/s2|counts|unknown\n"
+           "  --dt SECONDS | --fs HZ  --input-unit UNIT\n"
            "  --quantity acceleration|velocity|displacement|counts|unknown  --numeric-factor FACTOR\n"
+           "  --calibration raw|source|manual  --calibration-factor UNIT_PER_COUNT --calibration-unit UNIT\n"
+           "  --start-time UTC --relative-start SECONDS --network NET --station STA --location LOC | --clear-location\n"
+           "  --channel-code CHA | --source-id FDSN:...   --sac-input-units keep|standard\n"
+           "  --channel N selects a trace for identity edits and export. Empty metadata arguments clear fields.\n"
+           "Writer options:\n"
+           "  --text-layout values|time-values --text-header none|columns|metadata\n"
+           "  --text-delimiter whitespace|tab|comma --precision 1..17\n"
+           "  --sac-version 6|7 --sac-unit-mode keep|standard --mseed-encoding float64|float32|int32|steim2\n"
+           "Units: g, m/s2, cm/s2 (Gal), nm/s2; m/s, cm/s, mm/s, nm/s; m, cm, mm, nm; counts, unknown.\n"
            "Lines and columns are 1-based. Time columns use seconds.\n";
 }
 
@@ -72,6 +82,10 @@ Command parse(const Args& args, bool convert) {
             option = "--output";
         if (!seen.insert(option).second)
             throw std::invalid_argument("repeated option " + std::string{option});
+        if (option == "--clear-location") {
+            command.read.metadata.clear_location = true;
+            continue;
+        }
         if (convert && option == "--overwrite") {
             command.output.overwrite = true;
             continue;
@@ -81,6 +95,16 @@ Command parse(const Args& args, bool convert) {
         const std::string_view value = args[i];
         auto& read = command.read;
         auto& text = read.text;
+        auto& writer = command.output.writer;
+        const auto choice = [&](std::initializer_list<std::string_view> values) {
+            int index = 0;
+            for (auto candidate : values) {
+                if (candidate == value)
+                    return index;
+                ++index;
+            }
+            throw std::invalid_argument("invalid value for " + std::string{option});
+        };
         if (option == "--format")
             read.format = require(format_from_name(value), option, "a known input format");
         else if (option == "--profile") {
@@ -110,19 +134,55 @@ Command parse(const Args& args, bool convert) {
             read.overrides.quantity = require(quantity_from_name(value), option, "a known physical quantity");
         else if (option == "--numeric-factor")
             text.numeric_factor = require(parse_number(value), option, "a finite number");
+        else if (option == "--calibration")
+            read.calibration = static_cast<Calibration>(1 + choice({"raw", "source", "manual"}));
+        else if (option == "--calibration-factor")
+            read.calibration_factor = require(parse_number(value), option, "a finite physical-unit/count ratio");
+        else if (option == "--calibration-unit")
+            read.calibration_unit = require(unit_from_name(value), option, "a physical unit");
+        else if (option == "--sac-input-units")
+            read.sac_standard_units = choice({"keep", "standard"}) == 1;
+        else if (option == "--start-time")
+            read.metadata.start_utc = value;
+        else if (option == "--relative-start")
+            read.metadata.relative_start = value;
+        else if (option == "--network")
+            read.metadata.network = value;
+        else if (option == "--station")
+            read.metadata.station = value;
+        else if (option == "--location")
+            read.metadata.location = value;
+        else if (option == "--channel-code")
+            read.metadata.channel = value;
+        else if (option == "--source-id")
+            read.metadata.source_id = value;
+        else if (convert && option == "--text-layout")
+            writer.text_time_values = choice({"values", "time-values"}) == 1;
+        else if (convert && option == "--text-header")
+            writer.text_header = static_cast<TextHeader>(choice({"none", "columns", "metadata"}));
+        else if (convert && option == "--text-delimiter")
+            writer.text_delimiter = require(delimiter_from_name(value), option, "whitespace, comma or tab");
+        else if (convert && option == "--precision")
+            writer.precision = require(parse_index(value), option, "1..17");
+        else if (convert && option == "--sac-version")
+            writer.sac_version = 6 + choice({"6", "7"});
+        else if (convert && option == "--sac-unit-mode")
+            writer.sac_standard_units = choice({"keep", "standard"}) == 1;
+        else if (convert && option == "--mseed-encoding")
+            writer.mseed_encoding = static_cast<MseedEncoding>(choice({"float64", "float32", "int32", "steim2"}));
         else if (convert && option == "--to")
             command.output.writer.format = require(format_from_name(value), option, "a writable target format");
         else if (convert && option == "--output")
             command.output.output = path_from_utf8(value);
-        else if (convert && option == "--channel")
-            command.output.channels = {require(parse_index(value), option, "a positive channel number")};
-        else if (convert && option == "--output-unit") {
-            const auto unit = require(unit_from_name(value), option, "g, m/s2 or cm/s2");
-            if (unit != Unit::G && unit != Unit::Mps2 && unit != Unit::Cmps2)
-                throw std::invalid_argument("--output-unit requires g, m/s2 or cm/s2");
+        else if (option == "--channel") {
+            read.selected_channel = require(parse_index(value), option, "a positive channel number");
+            command.output.channels = {*read.selected_channel};
+        } else if (convert && option == "--output-unit") {
+            const auto unit = require(unit_from_name(value), option, "a physical unit");
+            if (!unit_factor(unit, unit))
+                throw std::invalid_argument("--output-unit requires a physical unit");
             command.output.writer.output_unit = unit;
-        }
-        else
+        } else
             throw std::invalid_argument("unknown option " + std::string{option});
     }
     if (command.input.empty())
@@ -162,13 +222,15 @@ void print_attributes(const Metadata& attributes, std::string_view indent) {
         std::cout << indent << key << " = " << value << '\n';
 }
 
-void print_info(const ReadResult& result) {
+void print_info(const ReadResult& result, std::optional<std::size_t> selected) {
     std::cout << "Format: " << name(result.data.source_format) << '\n';
     std::cout << "Traces: " << result.data.traces.size() << '\n';
     if (result.first_data_line)
         std::cout << "First data line: " << result.first_data_line << '\n';
     print_attributes(result.data.attributes, "  ");
     for (std::size_t i = 0; i < result.data.traces.size(); ++i) {
+        if (selected && *selected != i + 1)
+            continue;
         const auto& trace = result.data.traces[i];
         std::cout << '[' << i + 1 << "] " << (trace.name.empty() ? "(unnamed)" : trace.name) << '\n';
         std::cout << "  samples = " << trace.samples.size() << '\n';
@@ -234,7 +296,7 @@ int run(const Args& args) {
     if (has_errors(parsed.diagnostics))
         return 1;
     if (action == "info") {
-        print_info(parsed);
+        print_info(parsed, command.read.selected_channel);
         return 0;
     }
     const auto output = export_file(parsed.data, command.input, command.output);
