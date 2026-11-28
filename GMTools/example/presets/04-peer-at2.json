@@ -1,0 +1,18 @@
+{
+  "kind": "gmtools-conversion-preset",
+  "schema_version": 1,
+  "name": "PEER AT2 acceleration in g",
+  "read": {
+    "format": "auto",
+    "overrides": {
+      "quantity": "acceleration"
+    }
+  },
+  "write": {
+    "format": "at2",
+    "output_unit": "g"
+  },
+  "selection": {
+    "mode": "all"
+  }
+}

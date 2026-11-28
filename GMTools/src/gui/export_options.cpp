@@ -1,6 +1,7 @@
 #include "export_options.hpp"
 #include "ui_helpers.hpp"
 
+#include <QCoreApplication>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -11,7 +12,8 @@ namespace gmtools::gui {
 
 bool choose_writer_options(WriteOptions& options, QWidget* parent) {
     QDialog dialog(parent);
-    dialog.setWindowTitle(as_text(name(options.format)).toUpper() + QStringLiteral(" export options"));
+    dialog.setWindowTitle(QCoreApplication::translate("gmtools::gui::ExportOptions", "%1 export options")
+                              .arg(as_text(name(options.format)).toUpper()));
     QFormLayout form(&dialog);
     auto choice = [&](const QString& label, const QStringList& values, int initial) {
         auto* box = new QComboBox(&dialog);

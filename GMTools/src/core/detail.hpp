@@ -54,4 +54,25 @@ ReadResult read_mseed(std::span<const std::byte>, FormatId, const TextParseOptio
 WriteResult write_mseed(const Trace&, const WriteOptions&);
 #endif
 
+// Shared output planning used by both single-file export and batch conversion.
+struct OutputPlan {
+    FormatId format{FormatId::Auto};
+    bool named_file{};
+    std::filesystem::path directory;
+    std::vector<std::size_t> channels; // 1-based
+    std::vector<std::filesystem::path> targets;
+};
+
+std::optional<OutputPlan> plan_outputs(const FileData& data, const std::filesystem::path& input,
+                                       const ExportOptions& options, Diagnostics& diagnostics);
+bool same_location(const std::filesystem::path& left, const std::filesystem::path& right);
+bool validate_targets(const OutputPlan& plan, std::span<const std::filesystem::path> protected_paths,
+                      bool overwrite, std::span<const std::filesystem::path> reserved,
+                      Diagnostics& diagnostics,
+                      std::string_view protected_reason = "target refers to the input file");
+std::vector<std::filesystem::path> publish_outputs(const FileData& data, const OutputPlan& plan,
+                                                   const WriteOptions& writer, bool overwrite,
+                                                   Diagnostics& diagnostics,
+                                                   std::string* stage = nullptr);
+
 } // namespace gmtools::detail

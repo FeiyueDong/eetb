@@ -1,7 +1,12 @@
 #include "main_window.hpp"
 #include "background_task.hpp"
+#include "batch_dialog.hpp"
 #include "export_options.hpp"
 #include "override_fields.hpp"
+#include "preset_dialog.hpp"
+#include "preset_store.hpp"
+#include "settings.hpp"
+#include "settings_dialog.hpp"
 #include "ui_helpers.hpp"
 
 #include <QAction>
@@ -14,9 +19,11 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -67,26 +74,33 @@ QToolButton* action_button(QAction* action, QWidget* parent) {
 }
 
 QString channel_label(const Trace& trace, std::size_t channel) {
-    return trace_title(trace, channel) + QStringLiteral("\n%1 samples · %2")
-        .arg(trace.samples.size()).arg(as_text(name(trace.unit)));
+    return trace_title(trace, channel) +
+        QCoreApplication::translate("gmtools::gui::MainWindow", "\n%1 samples · %2")
+            .arg(trace.samples.size()).arg(as_text(name(trace.unit)));
 }
 
 } // namespace
 
 MainWindow::MainWindow() {
-    setWindowTitle(QStringLiteral("GMTools · Ground motion converter"));
+    setWindowTitle(tr("GMTools · Ground motion converter"));
     resize(1280, 820);
     setAcceptDrops(true);
 
-    open_action_ = new QAction(style()->standardIcon(QStyle::SP_DialogOpenButton), QStringLiteral("Open file…"), this);
+    open_action_ = new QAction(style()->standardIcon(QStyle::SP_DialogOpenButton), tr("Open file…"), this);
     open_action_->setShortcut(QKeySequence::Open);
-    reparse_action_ = new QAction(style()->standardIcon(QStyle::SP_BrowserReload), QStringLiteral("Import settings…"), this);
-    export_action_ = new QAction(QStringLiteral("Export checked channels"), this);
+    reparse_action_ = new QAction(style()->standardIcon(QStyle::SP_BrowserReload), tr("Import settings…"), this);
+    export_action_ = new QAction(tr("Export checked channels"), this);
     export_action_->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
-    addActions({open_action_, reparse_action_, export_action_});
+    settings_action_ = new QAction(tr("Settings…"), this);
+    settings_action_->setShortcut(QKeySequence::Preferences);
+    batch_action_ = new QAction(tr("Batch conversion…"), this);
+    batch_action_->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
+    addActions({open_action_, reparse_action_, export_action_, settings_action_, batch_action_});
     connect(open_action_, &QAction::triggered, this, &MainWindow::choose_file);
     connect(reparse_action_, &QAction::triggered, this, &MainWindow::reparse);
     connect(export_action_, &QAction::triggered, this, &MainWindow::send_export);
+    connect(settings_action_, &QAction::triggered, this, &MainWindow::open_settings);
+    connect(batch_action_, &QAction::triggered, this, &MainWindow::open_batch);
 
     auto* root = new QWidget(this);
     setCentralWidget(root);
@@ -97,9 +111,11 @@ MainWindow::MainWindow() {
     auto* brand = new QVBoxLayout;
     brand->setSpacing(3);
     brand->addWidget(label(QStringLiteral("GMTools"), "heading", root));
-    brand->addWidget(label(QStringLiteral("Ground motion converter"), "muted", root));
+    brand->addWidget(label(tr("Ground motion converter"), "muted", root));
     header->addLayout(brand);
     header->addStretch();
+    header->addWidget(action_button(batch_action_, root));
+    header->addWidget(action_button(settings_action_, root));
     header->addWidget(action_button(reparse_action_, root));
     header->addWidget(action_button(open_action_, root));
     outer->addLayout(header);
@@ -110,20 +126,20 @@ MainWindow::MainWindow() {
     auto* welcome = new QVBoxLayout(empty);
     welcome->setSpacing(18);
     welcome->addStretch();
-    auto* welcome_title = label(QStringLiteral("Convert a ground-motion record"), "title", empty);
+    auto* welcome_title = label(tr("Convert a ground-motion record"), "title", empty);
     welcome_title->setAlignment(Qt::AlignCenter);
     welcome->addWidget(welcome_title);
-    auto* hint = label(QStringLiteral("Open or drop one file to inspect its channels and export the records you need."), "muted", empty);
+    auto* hint = label(tr("Open or drop one file to inspect its channels and export the records you need."), "muted", empty);
     hint->setAlignment(Qt::AlignCenter);
     welcome->addWidget(hint);
-    auto* start = new QPushButton(style()->standardIcon(QStyle::SP_DialogOpenButton), QStringLiteral("Open a record…"), empty);
+    auto* start = new QPushButton(style()->standardIcon(QStyle::SP_DialogOpenButton), tr("Open a record…"), empty);
     start->setProperty("role", "primary");
     welcome->addWidget(start, 0, Qt::AlignHCenter);
     connect(start, &QPushButton::clicked, this, &MainWindow::choose_file);
     auto* steps = new QHBoxLayout;
-    for (const auto& step : {std::pair{QStringLiteral("01  Import"), QStringLiteral("Identify the format and check the text layout.")},
-                             std::pair{QStringLiteral("02  Review"), QStringLiteral("Inspect every channel, sampling interval and unit.")},
-                             std::pair{QStringLiteral("03  Export"), QStringLiteral("Write each checked channel to its own file.")}}) {
+    for (const auto& step : {std::pair{tr("01  Import"), tr("Identify the format and check the text layout.")},
+                             std::pair{tr("02  Review"), tr("Inspect every channel, sampling interval and unit.")},
+                             std::pair{tr("03  Export"), tr("Write each checked channel to its own file.")}}) {
         auto* panel = card(empty);
         auto* content = new QVBoxLayout(panel);
         content->setContentsMargins(20, 20, 20, 20);
@@ -133,7 +149,7 @@ MainWindow::MainWindow() {
     }
     welcome->addSpacing(16);
     welcome->addLayout(steps);
-    auto* formats_label = label(QStringLiteral("TXT / DAT    ·    CSV / TSV    ·    PEER AT2    ·    SAC    ·    K-NET"), "muted", empty);
+    auto* formats_label = label(tr("TXT / DAT    ·    CSV / TSV    ·    PEER AT2    ·    SAC    ·    K-NET"), "muted", empty);
     formats_label->setAlignment(Qt::AlignCenter);
     welcome->addWidget(formats_label);
     welcome->addStretch();
@@ -149,7 +165,7 @@ MainWindow::MainWindow() {
     auto* source_box = new QVBoxLayout(sources);
     source_box->setContentsMargins(14, 16, 14, 14);
     source_box->setSpacing(12);
-    source_box->addWidget(label(QStringLiteral("SOURCE FILE"), "muted", sources));
+    source_box->addWidget(label(tr("SOURCE FILE"), "muted", sources));
     source_label_ = label({}, "section", sources);
     source_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     source_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -157,29 +173,29 @@ MainWindow::MainWindow() {
     source_summary_ = label({}, "muted", sources);
     source_box->addWidget(source_summary_);
     source_box->addSpacing(6);
-    selection_label_ = label(QStringLiteral("Channels"), "section", sources);
+    selection_label_ = label(tr("Channels"), "section", sources);
     source_box->addWidget(selection_label_);
     channels_ = new QListWidget(sources);
-    channels_->setAccessibleName(QStringLiteral("Channels to inspect and export"));
+    channels_->setAccessibleName(tr("Channels to inspect and export"));
     channels_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     channels_->setTextElideMode(Qt::ElideRight);
     source_box->addWidget(channels_, 1);
     auto* select = new QHBoxLayout;
-    auto* all = new QPushButton(QStringLiteral("Select all"), sources);
-    auto* none = new QPushButton(QStringLiteral("Clear"), sources);
+    auto* all = new QPushButton(tr("Select all"), sources);
+    auto* none = new QPushButton(tr("Clear"), sources);
     select->addWidget(all);
     select->addWidget(none);
     source_box->addLayout(select);
-    source_box->addWidget(label(QStringLiteral("Check channels to export. Select a row to inspect its waveform."), "muted", sources));
+    source_box->addWidget(label(tr("Check channels to export. Select a row to inspect its waveform."), "muted", sources));
 
     auto* review = new QWidget(panes_);
     review->setMinimumWidth(300);
     auto* review_box = new QVBoxLayout(review);
     review_box->setContentsMargins(0, 0, 0, 0);
     review_box->setSpacing(10);
-    review_label_ = label(QStringLiteral("Waveform overview"), "section", review);
+    review_label_ = label(tr("Waveform overview"), "section", review);
     review_box->addWidget(review_label_);
-    review_box->addWidget(label(QStringLiteral("All channels · elapsed time when sampling is known"), "muted", review));
+    review_box->addWidget(label(tr("All channels · elapsed time when sampling is known"), "muted", review));
     plots_ = new QScrollArea(review);
     plots_->setWidgetResizable(true);
     review_box->addWidget(plots_, 1);
@@ -196,7 +212,7 @@ MainWindow::MainWindow() {
     auto* inspector = card(output);
     auto* inspector_box = new QVBoxLayout(inspector);
     inspector_box->setContentsMargins(14, 14, 14, 14);
-    inspector_box->addWidget(label(QStringLiteral("Channel details"), "section", inspector));
+    inspector_box->addWidget(label(tr("Channel details"), "section", inspector));
     auto* tabs = new QTabWidget(inspector);
     properties_ = new QTreeWidget(tabs);
     properties_->setColumnCount(2);
@@ -207,16 +223,16 @@ MainWindow::MainWindow() {
     properties_->setSelectionMode(QAbstractItemView::NoSelection);
     properties_->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     properties_->header()->setSectionResizeMode(1, QHeaderView::Stretch);
-    properties_->setAccessibleName(QStringLiteral("Selected channel properties"));
+    properties_->setAccessibleName(tr("Selected channel properties"));
     metadata_ = read_only_text(tabs);
-    metadata_->setPlaceholderText(QStringLiteral("Source fields and parameter provenance"));
+    metadata_->setPlaceholderText(tr("Source fields and parameter provenance"));
     diagnostics_ = read_only_text(tabs);
-    tabs->addTab(properties_, QStringLiteral("Summary"));
-    tabs->addTab(metadata_, QStringLiteral("Metadata"));
-    tabs->addTab(diagnostics_, QStringLiteral("Diagnostics"));
+    tabs->addTab(properties_, tr("Summary"));
+    tabs->addTab(metadata_, tr("Metadata"));
+    tabs->addTab(diagnostics_, tr("Diagnostics"));
     tabs->setMinimumHeight(260);
     inspector_box->addWidget(tabs);
-    edit_ = new QPushButton(QStringLiteral("Edit channel parameters…"), inspector);
+    edit_ = new QPushButton(tr("Edit channel parameters…"), inspector);
     inspector_box->addWidget(edit_);
     output_box->addWidget(inspector, 1);
 
@@ -224,7 +240,7 @@ MainWindow::MainWindow() {
     auto* export_box = new QVBoxLayout(export_card);
     export_box->setContentsMargins(14, 14, 14, 14);
     export_box->setSpacing(10);
-    export_box->addWidget(label(QStringLiteral("Export"), "section", export_card));
+    export_box->addWidget(label(tr("Export"), "section", export_card));
     auto* export_form = new QFormLayout;
     export_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     target_ = new QComboBox(export_card);
@@ -232,40 +248,51 @@ MainWindow::MainWindow() {
         if (item.writable) {
             const auto experimental = item.notes.starts_with("experimental:");
             target_->addItem(as_text(item.name).toUpper() +
-                (experimental ? QStringLiteral(" · experimental") : QString{}), static_cast<int>(item.id));
+                (experimental ? tr(" · experimental") : QString{}), static_cast<int>(item.id));
             target_->setItemData(target_->count() - 1, as_text(item.notes), Qt::ToolTipRole);
         }
     }
     target_->setCurrentIndex(target_->findData(static_cast<int>(FormatId::Csv)));
-    export_form->addRow(QStringLiteral("Format"), target_);
+    export_form->addRow(tr("Format"), target_);
     output_unit_ = new QComboBox(export_card);
-    export_form->addRow(QStringLiteral("Unit"), output_unit_);
-    format_options_ = new QPushButton("Format options…", export_card);
+    export_form->addRow(tr("Unit"), output_unit_);
+    format_options_ = new QPushButton(tr("Format options…"), export_card);
     export_form->addRow(format_options_);
     connect(format_options_, &QPushButton::clicked, this, [this] {
         if (choose_writer_options(writer_, this))
             update_format();
     });
     export_box->addLayout(export_form);
+    auto* preset_row = new QHBoxLayout;
+    auto* load_preset_button = new QPushButton(tr("Load preset…"), export_card);
+    auto* save_preset_button = new QPushButton(tr("Save preset…"), export_card);
+    auto* manage_presets_button = new QPushButton(tr("Manage…"), export_card);
+    preset_row->addWidget(load_preset_button);
+    preset_row->addWidget(save_preset_button);
+    preset_row->addWidget(manage_presets_button);
+    export_box->addLayout(preset_row);
+    connect(load_preset_button, &QPushButton::clicked, this, &MainWindow::load_preset);
+    connect(save_preset_button, &QPushButton::clicked, this, &MainWindow::save_preset);
+    connect(manage_presets_button, &QPushButton::clicked, this, &MainWindow::manage_presets);
     format_help_ = label({}, "muted", export_card);
     export_box->addWidget(format_help_);
-    export_box->addWidget(label(QStringLiteral("Output folder"), "section", export_card));
+    export_box->addWidget(label(tr("Output folder"), "section", export_card));
     auto* folder_row = new QHBoxLayout;
     output_directory_ = new QLineEdit(export_card);
     output_directory_->setReadOnly(true);
-    output_directory_->setPlaceholderText(QStringLiteral("Choose a folder…"));
-    output_directory_->setAccessibleName(QStringLiteral("Output folder"));
+    output_directory_->setPlaceholderText(tr("Choose a folder…"));
+    output_directory_->setAccessibleName(tr("Output folder"));
     folder_row->addWidget(output_directory_, 1);
     auto* browse = new QPushButton(style()->standardIcon(QStyle::SP_DirOpenIcon), QString(), export_card);
-    browse->setToolTip(QStringLiteral("Choose output folder"));
-    browse->setAccessibleName(QStringLiteral("Choose output folder"));
+    browse->setToolTip(tr("Choose output folder"));
+    browse->setAccessibleName(tr("Choose output folder"));
     folder_row->addWidget(browse);
     export_box->addLayout(folder_row);
-    overwrite_ = new QCheckBox(QStringLiteral("Replace existing output files"), export_card);
+    overwrite_ = new QCheckBox(tr("Replace existing output files"), export_card);
     export_box->addWidget(overwrite_);
-    export_ = new QPushButton(QStringLiteral("Export channels"), export_card);
+    export_ = new QPushButton(tr("Export channels"), export_card);
     export_->setProperty("role", "primary");
-    export_->setToolTip(QStringLiteral("Write one file per checked channel · Ctrl+Shift+E"));
+    export_->setToolTip(tr("Write one file per checked channel · Ctrl+Shift+E"));
     export_box->addWidget(export_);
     output_box->addWidget(export_card);
 
@@ -300,16 +327,39 @@ MainWindow::MainWindow() {
             resize(size().boundedTo(available.size()));
     }
     update_format();
+    if (const auto settings_now = AppSettings::load(); settings_now.remember_conversion_settings) {
+        QSettings stored;
+        if (stored.contains(QStringLiteral("conversion/format"))) {
+            const auto format = stored.value(QStringLiteral("conversion/format")).toInt();
+            if (const auto index = target_->findData(format); index >= 0) {
+                target_->setCurrentIndex(index);
+                writer_ = WriteOptions{};
+                writer_.format = static_cast<FormatId>(format);
+                update_format();
+            }
+        }
+        if (stored.contains(QStringLiteral("conversion/unit"))) {
+            const auto unit = stored.value(QStringLiteral("conversion/unit")).toInt();
+            if (const auto index = output_unit_->findData(unit); index >= 0)
+                output_unit_->setCurrentIndex(index);
+        }
+    } else {
+        QSettings stored;
+        stored.remove(QStringLiteral("conversion/format"));
+        stored.remove(QStringLiteral("conversion/unit"));
+    }
     refresh();
-    statusBar()->showMessage(QStringLiteral("Ready · open or drop a single record to begin"));
+    statusBar()->showMessage(tr("Ready · open or drop a single record to begin"));
 }
 
 void MainWindow::choose_file() {
     if (busy_)
         return;
+    const auto settings = AppSettings::load();
+    const auto start = settings.remember_directories
+        ? QSettings().value(QStringLiteral("paths/input")).toString() : QString{};
     const auto file = QFileDialog::getOpenFileName(
-        this, QStringLiteral("Open ground-motion record"),
-        QSettings().value(QStringLiteral("paths/input")).toString(),
+        this, tr("Open ground-motion record"), start,
         QStringLiteral("Waveform files (*.txt *.dat *.csv *.tsv *.at2 *.AT2 *.vt2 *.VT2 *.dt2 *.DT2 *.sac *.SAC "
                        "*.mseed *.miniseed *.msd *.ms *.knet *.ns *.ew *.ud *.ns1 *.ew1 *.ud1 *.ns2 *.ew2 *.ud2 "
                        "*.NS *.EW *.UD *.NS1 *.EW1 *.UD1 *.NS2 *.EW2 *.UD2);;All files (*)"));
@@ -318,8 +368,8 @@ void MainWindow::choose_file() {
 }
 
 bool MainWindow::confirm_replacement() {
-    return !edited_ || QMessageBox::question(this, QStringLiteral("Replace current channels"),
-        QStringLiteral("Continue and replace the current channel edits? The source file is unchanged."),
+    return !edited_ || QMessageBox::question(this, tr("Replace current channels"),
+        tr("Continue and replace the current channel edits? The source file is unchanged."),
         QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Yes;
 }
 
@@ -327,15 +377,17 @@ void MainWindow::open_file(const QString& file) {
     if (busy_ || !confirm_replacement())
         return;
     const auto path = path_from_utf8(as_utf8(file));
-    set_busy(true, QStringLiteral("Reading %1…").arg(as_text(path_to_utf8(path.filename()))));
+    set_busy(true, tr("Reading %1…").arg(as_text(path_to_utf8(path.filename()))));
     run_background(this, [path] { return load_file(path); }, [this, path](const auto& task) {
         set_busy(false);
         if (!task.value || has_errors(task.value->diagnostics)) {
-            QMessageBox::warning(this, QStringLiteral("Cannot open file"), task.value
+            QMessageBox::warning(this, tr("Cannot open file"), task.value
                 ? diagnostic_text(task.value->diagnostics) : task.error);
             return;
         }
-        if (auto parsed = interpret_input(task.value, path, {}, this)) {
+        const auto pending = pending_preset_;
+        auto initial = pending ? pending->read : ReadOptions{};
+        if (auto parsed = interpret_input(task.value, path, initial, this)) {
             input_ = path;
             bytes_ = task.value;
             if (output_directory_->text().isEmpty()) {
@@ -345,8 +397,13 @@ void MainWindow::open_file(const QString& file) {
                     directory = as_text(path_to_utf8(path.parent_path()));
                 output_directory_->setText(directory);
             }
-            QSettings().setValue(QStringLiteral("paths/input"), as_text(path_to_utf8(path.parent_path())));
+            if (AppSettings::load().remember_directories)
+                QSettings().setValue(QStringLiteral("paths/input"), as_text(path_to_utf8(path.parent_path())));
             accept_parse(std::move(*parsed));
+            if (pending) {
+                pending_preset_.reset();
+                apply_preset(*pending, false);
+            }
         }
     });
 }
@@ -378,7 +435,7 @@ void MainWindow::accept_parse(ParsedInput parsed) {
     layout->addStretch();
     plots_->setWidget(container);
     refresh();
-    statusBar()->showMessage(QStringLiteral("Imported %1 channel(s) · %2 diagnostic(s)")
+    statusBar()->showMessage(tr("Imported %1 channel(s) · %2 diagnostic(s)")
         .arg(parsed_->data.traces.size()).arg(parsed_->diagnostics.size()));
 }
 
@@ -404,12 +461,12 @@ void MainWindow::refresh() {
         setWindowTitle(file + QStringLiteral(" · GMTools"));
         source_label_->setText(file);
         source_label_->setToolTip(as_text(path_to_utf8(input_)));
-        source_summary_->setText(QStringLiteral("%1 · %2 channel(s)")
+        source_summary_->setText(tr("%1 · %2 channel(s)")
             .arg(as_text(name(parsed_->data.source_format)).toUpper()).arg(parsed_->data.traces.size()) +
-            (parsed_->diagnostics.empty() ? QString{} : QStringLiteral("\n%1 import diagnostic(s)")
+            (parsed_->diagnostics.empty() ? QString{} : tr("\n%1 import diagnostic(s)")
                 .arg(parsed_->diagnostics.size())));
         diagnostics_->setPlainText(parsed_->diagnostics.empty()
-            ? QStringLiteral("No import diagnostics.") : diagnostic_text(parsed_->diagnostics));
+            ? tr("No import diagnostics.") : diagnostic_text(parsed_->diagnostics));
     }
     show_trace(false);
     set_busy(false);
@@ -426,8 +483,8 @@ void MainWindow::update_selection() {
     int count = 0;
     for (int i = 0; i < channels_->count(); ++i)
         count += channels_->item(i)->checkState() == Qt::Checked ? 1 : 0;
-    selection_label_->setText(QStringLiteral("Channels · %1 / %2 checked").arg(count).arg(channels_->count()));
-    export_->setText(count ? QStringLiteral("Export %1 channel(s)").arg(count) : QStringLiteral("Select channels to export"));
+    selection_label_->setText(tr("Channels · %1 / %2 checked").arg(count).arg(channels_->count()));
+    export_->setText(count ? tr("Export %1 channel(s)").arg(count) : tr("Select channels to export"));
     const bool ready = !busy_ && count > 0 && !output_directory_->text().isEmpty();
     export_->setEnabled(ready);
     export_action_->setEnabled(ready);
@@ -445,22 +502,22 @@ void MainWindow::show_trace(bool scroll) {
         return;
     const auto index = static_cast<std::size_t>(row);
     const auto& trace = parsed_->data.traces[index];
-    review_label_->setText(QStringLiteral("Waveforms · channel %1 selected").arg(row + 1));
+    review_label_->setText(tr("Waveforms · channel %1 selected").arg(row + 1));
     const auto property = [this](const QString& key, const QString& value) {
         auto* item = new QTreeWidgetItem(properties_, {key, value});
         item->setToolTip(1, value);
     };
-    property(QStringLiteral("Name"), trace.name.empty() ? QStringLiteral("Unnamed") : as_text(trace.name));
-    property(QStringLiteral("Samples"), QString::number(trace.samples.size()));
-    property(QStringLiteral("Interval · dt"), trace.dt_seconds ? displayed_number(*trace.dt_seconds) + QStringLiteral(" s") : QStringLiteral("Unknown"));
-    property(QStringLiteral("Span · (N−1)dt"), trace.sample_span() ? displayed_number(*trace.sample_span()) + QStringLiteral(" s") : QStringLiteral("Unknown"));
-    property(QStringLiteral("Length · Ndt"), trace.record_length() ? displayed_number(*trace.record_length()) + QStringLiteral(" s") : QStringLiteral("Unknown"));
-    property(QStringLiteral("Quantity"), as_text(name(trace.quantity)));
-    property(QStringLiteral("Input unit"), as_text(name(trace.unit)));
+    property(tr("Name"), trace.name.empty() ? tr("Unnamed") : as_text(trace.name));
+    property(tr("Samples"), QString::number(trace.samples.size()));
+    property(tr("Interval · dt"), trace.dt_seconds ? displayed_number(*trace.dt_seconds) + tr(" s") : tr("Unknown"));
+    property(tr("Span · (N−1)dt"), trace.sample_span() ? displayed_number(*trace.sample_span()) + tr(" s") : tr("Unknown"));
+    property(tr("Length · Ndt"), trace.record_length() ? displayed_number(*trace.record_length()) + tr(" s") : tr("Unknown"));
+    property(tr("Quantity"), as_text(name(trace.quantity)));
+    property(tr("Input unit"), as_text(name(trace.unit)));
     if (trace.relative_start_seconds)
-        property(QStringLiteral("Relative start"), displayed_number(*trace.relative_start_seconds) + QStringLiteral(" s"));
+        property(tr("Relative start"), displayed_number(*trace.relative_start_seconds) + tr(" s"));
     if (trace.start_time)
-        property(QStringLiteral("Start · UTC"), as_text(timestamp(*trace.start_time)));
+        property(tr("Start · UTC"), as_text(timestamp(*trace.start_time)));
     for (const auto& [key, label] : {std::pair{"modified.sensitivity", "Encoded sensitivity"},
                                      {"modified.dimension", "Sensor quantity"},
                                      {"modified.segment", "Segment"},
@@ -484,11 +541,11 @@ void MainWindow::show_trace(bool scroll) {
     }
     QString metadata;
     if (!parsed_->data.attributes.empty()) {
-        metadata = QStringLiteral("FILE FIELDS");
+        metadata = tr("FILE FIELDS");
         append_metadata(metadata, parsed_->data.attributes);
     }
     if (!trace.attributes.empty()) {
-        metadata += QStringLiteral("\n\nCHANNEL FIELDS");
+        metadata += tr("\n\nCHANNEL FIELDS");
         append_metadata(metadata, trace.attributes);
     }
     metadata_->setPlainText(metadata.trimmed());
@@ -508,8 +565,8 @@ void MainWindow::update_format() {
     output_unit_->clear();
     const auto required = format == FormatId::At2 ? Unit::G : format == FormatId::Vt2 ? Unit::Cmps : Unit::Cm;
     output_unit_->addItem(peer       ? as_text(name(required))
-                          : standard ? QStringLiteral("Standard nanounits")
-                                     : QStringLiteral("Keep input unit"));
+                          : standard ? tr("Standard nanounits")
+                                     : tr("Keep input unit"));
     std::optional<Quantity> common;
     if (!peer && !standard && parsed_) {
         for (int i = 0; i < channels_->count(); ++i) {
@@ -547,16 +604,16 @@ void MainWindow::edit_trace() {
         return;
     auto& trace = parsed_->data.traces[static_cast<std::size_t>(row)];
     QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("Edit channel parameters"));
+    dialog.setWindowTitle(tr("Edit channel parameters"));
     dialog.setMinimumWidth(430);
     auto* form = new QFormLayout(&dialog);
     form->setContentsMargins(20, 20, 20, 20);
     form->setSpacing(12);
     auto* channel_name = new QLineEdit(as_text(trace.name), &dialog);
-    form->addRow(QStringLiteral("Channel name"), channel_name);
+    form->addRow(tr("Channel name"), channel_name);
     form->addRow(label(timing_unit(trace), "muted", &dialog));
-    const OverrideFields fields(form, {}, QStringLiteral("Keep current"));
-    form->addRow(label(QStringLiteral("Input units describe the existing values. To convert values, choose an output unit in Export."), "muted", &dialog));
+    const OverrideFields fields(form, {}, tr("Keep current"));
+    form->addRow(label(tr("Input units describe the existing values. To convert values, choose an output unit in Export."), "muted", &dialog));
     MetadataEdit edits;
     using Field = std::optional<std::string> MetadataEdit::*;
     struct Editor {
@@ -590,7 +647,7 @@ void MainWindow::edit_trace() {
                        "muted", &dialog));
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setProperty("role", "primary");
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Apply changes"));
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Apply changes"));
     form->addRow(buttons);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
@@ -622,7 +679,7 @@ void MainWindow::edit_trace() {
                                  new_name != trace.name;
             auto diagnostics = apply_overrides(trace, options);
             if (has_errors(diagnostics)) {
-                QMessageBox::warning(&dialog, QStringLiteral("Invalid parameters"), diagnostic_text(diagnostics));
+                QMessageBox::warning(&dialog, tr("Invalid parameters"), diagnostic_text(diagnostics));
                 return;
             }
             for (auto& diagnostic : diagnostics) {
@@ -639,14 +696,14 @@ void MainWindow::edit_trace() {
             edited_ |= changed;
             dialog.accept();
         } catch (const std::exception& problem) {
-            QMessageBox::warning(&dialog, QStringLiteral("Invalid parameters"), as_text(problem.what()));
+            QMessageBox::warning(&dialog, tr("Invalid parameters"), as_text(problem.what()));
         }
     });
     if (dialog.exec() == QDialog::Accepted) {
         auto* item = channels_->item(row);
         item->setText(channel_label(trace, static_cast<std::size_t>(row) + 1));
         item->setToolTip(trace_title(trace, static_cast<std::size_t>(row) + 1) + '\n' + timing_unit(trace));
-        diagnostics_->setPlainText(parsed_->diagnostics.empty() ? QStringLiteral("No import diagnostics.") : diagnostic_text(parsed_->diagnostics));
+        diagnostics_->setPlainText(parsed_->diagnostics.empty() ? tr("No import diagnostics.") : diagnostic_text(parsed_->diagnostics));
         trace_plots_[static_cast<std::size_t>(row)]->set_metadata(trace);
         show_trace(false);
         update_format();
@@ -654,7 +711,10 @@ void MainWindow::edit_trace() {
 }
 
 void MainWindow::choose_output() {
-    const auto directory = QFileDialog::getExistingDirectory(this, QStringLiteral("Choose output folder"), output_directory_->text());
+    const auto directory = QFileDialog::getExistingDirectory(
+        this, tr("Choose output folder"),
+        output_directory_->text().isEmpty() && !AppSettings::load().remember_directories
+            ? QString{} : output_directory_->text());
     if (!directory.isEmpty())
         output_directory_->setText(directory);
 }
@@ -676,14 +736,14 @@ void MainWindow::send_export() {
     options.overwrite = overwrite_->isChecked();
     const bool all_channels = options.channels.size() == parsed_->data.traces.size();
     const auto directory = output_directory_->text();
-    set_busy(true, QStringLiteral("Exporting %1 channel(s)…").arg(options.channels.size()));
+    set_busy(true, tr("Exporting %1 channel(s)…").arg(options.channels.size()));
     // Editing/importing is disabled until this worker releases the shared document.
     run_background(this, [parsed = parsed_, input = input_, options] {
         return export_file(parsed->data, input, options);
-    }, [this, directory, all_channels](const auto& task) {
+    }, [this, directory, all_channels, options](const auto& task) {
         set_busy(false);
         if (!task.value) {
-            QMessageBox::warning(this, QStringLiteral("Export failed"), task.error);
+            QMessageBox::warning(this, tr("Export failed"), task.error);
             return;
         }
         const auto& result = *task.value;
@@ -691,14 +751,23 @@ void MainWindow::send_export() {
         if (!failed) {
             if (all_channels)
                 edited_ = false;
-            QSettings().setValue(QStringLiteral("paths/output"), directory);
+            QSettings stored;
+            if (AppSettings::load().remember_directories)
+                stored.setValue(QStringLiteral("paths/output"), directory);
+            if (AppSettings::load().remember_conversion_settings) {
+                stored.setValue(QStringLiteral("conversion/format"), static_cast<int>(options.writer.format));
+                if (options.writer.output_unit)
+                    stored.setValue(QStringLiteral("conversion/unit"), static_cast<int>(*options.writer.output_unit));
+                else
+                    stored.remove(QStringLiteral("conversion/unit"));
+            }
         }
         QMessageBox report(this);
-        report.setWindowTitle(QStringLiteral("Export results"));
+        report.setWindowTitle(tr("Export results"));
         report.setTextFormat(Qt::PlainText);
         report.setIcon(failed ? QMessageBox::Warning : QMessageBox::Information);
-        report.setText(failed ? QStringLiteral("Export incomplete · %1 file(s) written").arg(result.written.size())
-                              : QStringLiteral("Exported %1 file(s)").arg(result.written.size()));
+        report.setText(failed ? tr("Export incomplete · %1 file(s) written").arg(result.written.size())
+                              : tr("Exported %1 file(s)").arg(result.written.size()));
         const auto issue = std::ranges::find_if(result.diagnostics, [](const auto& diagnostic) {
             return diagnostic.severity == Severity::Error;
         });
@@ -706,7 +775,7 @@ void MainWindow::send_export() {
             report.setInformativeText(as_text(describe(*issue)));
         else
             report.setInformativeText(directory + (result.diagnostics.empty() ? QString{} :
-                QStringLiteral("\n%1 warning(s); expand Details for metadata and conversion notes.").arg(result.diagnostics.size())));
+                tr("\n%1 warning(s); expand Details for metadata and conversion notes.").arg(result.diagnostics.size())));
         QStringList details;
         for (const auto& path : result.written)
             details << as_text(path_to_utf8(path));
@@ -714,12 +783,155 @@ void MainWindow::send_export() {
             details << diagnostic_text(result.diagnostics);
         report.setDetailedText(details.join('\n'));
         report.addButton(QMessageBox::Ok);
-        auto* folder = result.written.empty() ? nullptr : report.addButton(QStringLiteral("Open folder"), QMessageBox::ActionRole);
+        auto* folder = result.written.empty() ? nullptr : report.addButton(tr("Open folder"), QMessageBox::ActionRole);
         statusBar()->showMessage(report.text());
         report.exec();
         if (folder && report.clickedButton() == folder)
             QDesktopServices::openUrl(QUrl::fromLocalFile(directory));
     });
+}
+
+
+void MainWindow::open_settings() {
+    if (busy_)
+        return;
+    SettingsDialog dialog(AppSettings::load(), this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    dialog.settings().save();
+    QMessageBox::information(this, tr("Settings"),
+        tr("Language and theme changes take effect after restarting GMTools."));
+}
+
+void MainWindow::open_batch() {
+    if (busy_)
+        return;
+    BatchDialog dialog(this);
+    dialog.exec();
+}
+
+void MainWindow::manage_presets() {
+    if (busy_)
+        return;
+    PresetDialog dialog([this] { return current_preset(); }, this);
+    if (const auto preset = dialog.take_selected())
+        apply_preset(*preset);
+}
+
+void MainWindow::load_preset() {
+    if (busy_)
+        return;
+    const auto file = QFileDialog::getOpenFileName(this, tr("Load conversion preset"), {},
+        tr("Conversion presets (*.json);;All files (*)"));
+    if (file.isEmpty())
+        return;
+    const auto loaded = gmtools::load_preset(gmtools::path_from_utf8(as_utf8(file)));
+    if (has_errors(loaded.diagnostics)) {
+        QMessageBox::warning(this, tr("Preset not loaded"), diagnostic_text(loaded.diagnostics));
+        return;
+    }
+    apply_preset(loaded.preset);
+}
+
+ConversionPreset MainWindow::current_preset() const {
+    ConversionPreset preset;
+    if (bytes_)
+        preset.read = last_options_;
+    preset.read.metadata = {};
+    preset.read.selected_channel.reset();
+    preset.read.extension_hint.clear();
+    preset.write = writer_;
+    if (output_unit_->currentData().isValid())
+        preset.write.output_unit = static_cast<Unit>(output_unit_->currentData().toInt());
+    preset.selection.mode = ChannelSelectionMode::All;
+    if (parsed_ && !parsed_->data.traces.empty()) {
+        std::optional<Quantity> selected;
+        bool uniform = true;
+        std::size_t checked = 0;
+        for (int row = 0; row < channels_->count(); ++row) {
+            if (channels_->item(row)->checkState() != Qt::Checked)
+                continue;
+            ++checked;
+            const auto quantity = parsed_->data.traces[static_cast<std::size_t>(row)].quantity;
+            if (selected && *selected != quantity)
+                uniform = false;
+            selected = quantity;
+        }
+        // Only narrow to one quantity when the user left part of the record out.
+        if (checked > 0 && checked < parsed_->data.traces.size() && uniform && selected) {
+            preset.selection.mode = ChannelSelectionMode::Quantity;
+            preset.selection.quantity = *selected;
+        }
+    }
+    return preset;
+}
+
+void MainWindow::save_preset() {
+    if (busy_)
+        return;
+    bool ok = false;
+    const auto name = QInputDialog::getText(this, tr("Save conversion preset"), tr("Preset name:"),
+        QLineEdit::Normal, {}, &ok).trimmed();
+    if (!ok || name.isEmpty())
+        return;
+    const auto file = suggested_preset_path(name);
+    if (QFileInfo::exists(file) && QMessageBox::question(this, tr("Replace preset"),
+            tr("A preset named \"%1\" already exists. Replace it?").arg(name),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes)
+        return;
+    auto preset = current_preset();
+    preset.name = as_utf8(name);
+    const auto diagnostics = write_preset_file(file, preset, true);
+    if (has_errors(diagnostics)) {
+        QMessageBox::warning(this, tr("Preset not saved"), diagnostic_text(diagnostics));
+        return;
+    }
+    statusBar()->showMessage(tr("Preset saved · %1").arg(name));
+}
+
+void MainWindow::apply_preset(const ConversionPreset& preset, bool reopen) {
+    if (!bytes_ && !parsed_) {
+        pending_preset_ = preset;
+        statusBar()->showMessage(tr("Preset loaded. It will be applied to the next record you open."));
+        return;
+    }
+    const auto writer_before = writer_;
+    if (preset.write.format != FormatId::Auto) {
+        writer_ = preset.write;
+        if (const auto index = target_->findData(static_cast<int>(preset.write.format)); index >= 0)
+            target_->setCurrentIndex(index);
+    }
+    if (preset.write.output_unit) {
+        if (const auto index = output_unit_->findData(static_cast<int>(*preset.write.output_unit)); index >= 0)
+            output_unit_->setCurrentIndex(index);
+    }
+    if (!preset.name.empty())
+        statusBar()->showMessage(tr("Preset · %1").arg(as_text(preset.name)));
+    if (reopen) {
+        if (!confirm_replacement()) {
+            writer_ = writer_before;
+            update_format();
+            return;
+        }
+        auto options = preset.read;
+        options.extension_hint = last_options_.extension_hint;
+        auto parsed = interpret_input(bytes_, input_, options, this);
+        if (!parsed) {
+            writer_ = writer_before;
+            update_format();
+            return;
+        }
+        accept_parse(std::move(*parsed));
+    }
+    if (parsed_) {
+        for (std::size_t i = 0; i < parsed_->data.traces.size(); ++i) {
+            const bool selected = preset.selection.mode == ChannelSelectionMode::All ||
+                parsed_->data.traces[i].quantity == preset.selection.quantity;
+            if (auto* item = channels_->item(static_cast<int>(i)))
+                item->setCheckState(selected ? Qt::Checked : Qt::Unchecked);
+        }
+        update_selection();
+    }
 }
 
 void MainWindow::set_busy(bool busy, const QString& message) {
@@ -730,17 +942,17 @@ void MainWindow::set_busy(bool busy, const QString& message) {
     edit_->setEnabled(!busy && channels_->currentRow() >= 0);
     progress_->setVisible(busy);
     update_selection();
-    statusBar()->showMessage(message.isEmpty() ? QStringLiteral("Ready") : message);
+    statusBar()->showMessage(message.isEmpty() ? tr("Ready") : message);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (busy_) {
-        statusBar()->showMessage(QStringLiteral("Please wait for the current operation to finish before closing."));
+        statusBar()->showMessage(tr("Please wait for the current operation to finish before closing."));
         event->ignore();
         return;
     }
-    if (edited_ && QMessageBox::question(this, QStringLiteral("Close GMTools"),
-            QStringLiteral("Some channel edits have not been exported together. Close this record? The source file is unchanged."),
+    if (edited_ && QMessageBox::question(this, tr("Close GMTools"),
+            tr("Some channel edits have not been exported together. Close this record? The source file is unchanged."),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
         event->ignore();
         return;

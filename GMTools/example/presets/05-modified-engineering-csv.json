@@ -1,0 +1,20 @@
+{
+  "kind": "gmtools-conversion-preset",
+  "schema_version": 1,
+  "name": "Modified miniSEED calibrated CSV",
+  "read": {
+    "format": "modified-mseed",
+    "calibration": "source"
+  },
+  "write": {
+    "format": "csv",
+    "output_unit": "cm/s2",
+    "text_layout": "elapsed-time",
+    "text_header": "metadata",
+    "text_delimiter": "comma",
+    "precision": 6
+  },
+  "selection": {
+    "mode": "all"
+  }
+}

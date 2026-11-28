@@ -4,6 +4,8 @@
 
 #include <QMainWindow>
 
+#include <optional>
+
 class QAction;
 class QCheckBox;
 class QComboBox;
@@ -21,6 +23,7 @@ class QTreeWidget;
 namespace gmtools::gui {
 
 class MainWindow final : public QMainWindow {
+    Q_OBJECT
 public:
     MainWindow();
 
@@ -43,6 +46,13 @@ private:
     void edit_trace();
     void choose_output();
     void send_export();
+    void open_settings();
+    void open_batch();
+    void load_preset();
+    void save_preset();
+    void manage_presets();
+    void apply_preset(const ConversionPreset& preset, bool reopen = true);
+    ConversionPreset current_preset() const;
     void set_busy(bool busy, const QString& message = {});
 
     std::filesystem::path input_;
@@ -55,6 +65,8 @@ private:
     QAction* open_action_{};
     QAction* reparse_action_{};
     QAction* export_action_{};
+    QAction* settings_action_{};
+    QAction* batch_action_{};
     QStackedWidget* workspace_{};
     QSplitter* panes_{};
     QLabel* source_label_{};
@@ -76,6 +88,7 @@ private:
     QLabel* format_help_{};
     QLineEdit* output_directory_{};
     QProgressBar* progress_{};
+    std::optional<ConversionPreset> pending_preset_;
 };
 
 } // namespace gmtools::gui

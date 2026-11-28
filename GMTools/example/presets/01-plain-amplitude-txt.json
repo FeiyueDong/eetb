@@ -1,0 +1,14 @@
+{
+  "kind": "gmtools-conversion-preset",
+  "schema_version": 1,
+  "name": "Plain amplitude TXT",
+  "read": {
+    "format": "auto"
+  },
+  "write": {
+    "format": "text"
+  },
+  "selection": {
+    "mode": "all"
+  }
+}

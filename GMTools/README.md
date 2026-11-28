@@ -38,6 +38,8 @@ xmake install -o /path/to/install
 
 miniSEED 需要 libmseed 3.5.3 或更新的 3.x 版本。`--mseed_sdk` 下应有 `include/libmseed.h` 和 `lib/`（或 `lib64/`）中的 mseed 库；显式路径无效时直接报错。不指定该选项时，通过 pkg-config 的 `mseed.pc` 查找，可用 `PKG_CONFIG_PATH` 指向安装目录。关闭 miniSEED 时不查找该依赖。分发包含 libmseed 的程序时需附带依赖的 Apache 2.0 许可及适用声明。[EarthScope libmseed](https://github.com/EarthScope/libmseed/tree/v3.5.3)
 
+GUI 的翻译源文件为 [`translations/gmtools_zh_CN.ts`](translations/gmtools_zh_CN.ts)。构建 GUI 时需要 Qt Linguist 的 `lrelease`；xmake 会把它生成到产物的 `translations/` 目录，找不到工具时 GUI 构建报错，CLI 构建不受影响。修改界面文字后用 `lupdate src -ts translations/gmtools_zh_CN.ts` 更新源文件，再由构建完成编译。
+
 当前构建入口为 [`xmake.lua`](xmake.lua)，不再维护 CMake 配置；`docs/validation/` 和架构整理记录中的旧命令属于对应版本的历史证据。旧 `build/` 下的 CMake 产物不会自动删除。
 
 ## 格式与限制
@@ -170,17 +172,84 @@ CLI 显式填写的值优先于 Profile。例如显式 `--fs` 替换 Profile 的
 
 诸如 `Time[s]`、`Time (s)` 和 `Accel[g]` 的明确标签可用来提出导入建议。程序先核对完整数据区和时间网格。CLI 将建议写到标准错误，GUI 可通过 **Apply text suggestions** 应用。建议需要显式采用，多个候选时间列或不同数据列的量或单位冲突时由用户选择。
 
+## 语言、主题与设置
+
+GUI 的语言与主题由 **Settings**（`Ctrl+,`）设置，也可在未打开文件时调整。默认跟随系统；可选简体中文/English 以及跟随系统/浅色/深色。两者在重新启动后生效，程序会提示。语言设置只影响界面文字，不改变格式名、单位符号、JSON 字段、CLI 输出、Core 诊断原文和已有的元信息键值。
+
+设置项还包括“记住最近使用的目录”和“记住上次转换设置”。关闭记忆后程序不再读写对应值，并清除已有记录。最近转换设置只恢复目标格式与输出单位这类通用参数，不恢复 UTC、台站标识、通道选择、覆盖开关或临时路径。覆盖开关每批默认关闭。
+
+## 转换预设
+
+转换预设把输入解释、标定和写出参数保存为一份独立 JSON，供 CLI 与 GUI 共用。预设不包含路径、覆盖许可、波形数据和通道标识；这些仍由每次运行的显式参数决定。
+
+```json
+{
+  "kind": "gmtools-conversion-preset",
+  "schema_version": 1,
+  "name": "Time series CSV with metadata header",
+  "read": {"format": "auto", "text": {"layout": "columnar", "time_column": 1}},
+  "write": {"format": "csv", "text_layout": "elapsed-time", "text_header": "metadata", "precision": 6},
+  "selection": {"mode": "all"}
+}
+```
+
+| 字段 | 允许值 |
+|---|---|
+| `kind` | 必填，固定为 `gmtools-conversion-preset`。 |
+| `schema_version` | 必填，整数 `1`。 |
+| `name` | 可选，最长 120 字符。 |
+| `read.format` | `auto` 或任一格式名，如 `text`、`csv`、`at2`、`sac`、`modified-mseed`。 |
+| `read.text` | 与 Profile 相同的文本字段：`first_line`、`last_line`、`layout`、`delimiter`、`data_columns`、`time_column`、`numeric_factor`。只适用于文本类输入。 |
+| `read.overrides` | `dt`、`fs`、`quantity`、`unit`；`dt` 与 `fs` 互斥。 |
+| `read.calibration` | `default`、`raw`、`source`、`manual`；`manual` 必须同时给出 `calibration_factor` 与 `calibration_unit`。 |
+| `read.sac_standard_units` | 可选布尔值，仅适用于 SAC。 |
+| `write.format` | 必填，不能为 `auto`。 |
+| `write.output_unit` | 省略表示保持输入单位；CLI 的 `--output-unit keep` 可清除预设单位。 |
+| `write.text_layout`、`text_header`、`text_delimiter`、`precision` | 文本写出选项。 |
+| `write.sac_version`、`sac_unit_mode`、`mseed_encoding` | 对应格式的写出选项，只在该格式适用。 |
+| `selection.mode` | `all` 或 `quantity`；后者必须给出 `quantity`。 |
+
+优先级为默认值 < 预设 < 本次显式参数。CLI 以参数是否出现判断覆盖，因此 `--format auto`、`--calibration default` 也能显式清除预设值。`--to` 覆盖预设目标格式时只清除不再适用的写出参数并提示；显式传入但不适用于目标格式的专有参数会报错。`--profile` 与 `--preset` 不能同时使用。预设与 Profile 是两份独立格式：Profile v1 仍只保存文本解释参数，不会被迁移或改写。
+
+内置示例位于 [`example/presets/`](example/presets)：纯幅值 TXT、带时间列与元信息表头的 CSV、cm/s² 文本加速度、PEER AT2、Modified miniSEED 工程单位 CSV。示例不猜测单位、采样率或标定系数；缺少时由命令行或界面补充。GUI 管理的预设保存在本机配置目录的 `presets/` 下，CLI 只读取显式给出的文件。载入预设会完整替换表单（包括清空未设置的字段）并显示预设名称，之后仍可手动修改。
+
+## 批量转换
+
+`batch` 把同一份有效配置依次应用到多个输入文件。每个文件仍按单文件规则读取、标定、筛选和写出；单个文件失败不会中断其余文件。
+
+```sh
+# 目录中的全部文件，预设提供读取与写出参数；时间列需要采样间隔
+xmake run gmtools batch --input-dir records -o out/batch \
+  --preset example/presets/02-time-series-csv.json --dt 0.01
+
+# 只处理 *.at2，显式指定目标格式与输出单位
+xmake run gmtools batch --input-dir records --filter '*.at2' -o out/batch --to at2 --output-unit g
+
+# 显式文件列表，保持给定顺序
+xmake run gmtools batch one.at2 two.dat three.csv -o out/batch --to csv
+```
+
+显式列表与 `--input-dir` 二选一，`-o` 必须是目录。目录默认不递归，`--filter` 只按文件名的 `*`、`?` 通配符匹配；目录结果按文件名稳定排序。重复输入（同一文件、别名或大小写等价）会被提示并跳过。空列表或无匹配文件返回非零。
+
+命名规则与单文件导出一致：输出目录中平铺 `<输入文件名主干>_<安全通道名>.<扩展名>`。读取失败、没有选中通道或编码失败的文件不产生输出。已有目标只有在本次给出 `--overwrite` 时才替换；目标指向批次内任一源文件时永远拒绝，覆盖也不解除该限制。同一批次内两个文件生成同一目标时，先处理者保留，后者失败并注明来源。输出目录不存在时按目录语义创建。
+
+`--select-all` 导出全部通道（默认）；`--select-quantity acceleration|velocity|displacement|counts|unknown` 在完整读取与标定后按物理量筛选，未匹配时该文件失败，不会把空列表传给导出层。批量不接受 `--channel`、UTC、相对起点或 NSLC/SID 等单文件覆盖，这些仍用 `convert`。
+
+`Ctrl+C`（`SIGINT`）在完成当前文件并发布结果后停止，尚未开始的文件标记为已取消，退出码为 `130`。全部成功为 `0`；任一失败、部分成功或取消为非零；参数或公共配置错误为 `2`。进度按文件输出终态，每个文件保留失败阶段、选中通道数、实际写出路径与诊断原文。
+
 ## GUI
 
 1. 点击 **Open file**、按 `Ctrl+O` 或拖入单个文件。解析窗口支持自动识别或手动选格式。
 2. 对照编号原文检查数据起始行、布局、列号、时间列和采样间隔。通用文本可以选择 **Apply text suggestions**、**Load profile** 或 **Save profile**。用 **Preview parse** 查看通道数、样本数、单位和诊断，再点击 **Import channels**。修改表单后，旧预览会失效；参数未变化时直接复用成功的预览结果。
 3. 左侧列出全部通道，点击通道可定位并高亮对应波形，勾选决定导出范围。右侧 **Summary / Metadata / Diagnostics** 分别展示参数、来源字段及导入诊断。波形横轴在已知 dt 时显示首样本起的经过时间，其他情况显示样本序号。大记录使用保留极值的概览包络绘图，导出仍使用完整样本。
 4. 使用 **Edit channel parameters** 编辑显示名称、采样信息、量与单位、UTC、相对起点及 SID/NSLC。输入单位用于解释现有数值，导出区的输出单位才执行数值换算。K-NET 的额外 **Numeric factor** 在仪器标定后应用；标准格式的单位和采样约束仍由核心检查。
-5. 在 **Export** 中选择目标格式、勾选通道共同适用的输出单位和目录。**Format options** 可调整文本布局及表头、SAC 版本和单位策略、miniSEED 编码。点击导出按钮或按 `Ctrl+Shift+E`。按钮显示勾选数量，未选通道时禁用。格式说明提前展示采样和元数据限制，结果窗口列出实际文件与诊断，并可打开输出目录。
+5. 在 **Export** 中选择目标格式、勾选通道共同适用的输出单位和目录。**Load preset / Save preset / Manage** 载入或保存转换预设；载入后从原始字节重新解析，不会在已标定的样本上再次标定。**Format options** 可调整文本布局及表头、SAC 版本和单位策略、miniSEED 编码。点击导出按钮或按 `Ctrl+Shift+E`。按钮显示勾选数量，未选通道时禁用。格式说明提前展示采样和元数据限制，结果窗口列出实际文件与诊断，并可打开输出目录。
 
-读取、解析、波形概览计算与导出在后台执行；执行期间显示忙碌指示，禁止替换记录、编辑及关闭正在工作的窗口。打开新文件或重新解释文件时会重置覆盖开关，有未全部导出的通道编辑时会提示。窗口尺寸、面板比例及最近使用目录保存在本机 Qt 设置中。界面按启动时的系统配色选择浅色或深色主题。
+6. **Settings** 调整语言、主题和记忆选项，**Batch conversion**（`Ctrl+B`）打开批量窗口。批量窗口显示文件表、预设、输入参数、通道筛选、输出目录与覆盖开关；**Add files / Add directory** 去重后加入列表，目录按文件名模式筛选且默认不递归；也可以把多个文件或目录拖入批量窗口。开始前会确认文件数、输出目录与命名规则。运行期间只能停止或关闭详情，关闭请求走安全停止；结束后列出每个文件的状态、写出数量与诊断，并可打开输出目录。
 
-模块职责、此次整理的问题及人工检查项目见[架构与界面整理记录](docs/ARCHITECTURE_AND_UI_REVIEW.md)。
+读取、解析、波形概览计算、批量与导出在后台执行；执行期间显示忙碌指示，禁止替换记录、编辑及关闭正在工作的窗口。打开新文件或重新解释文件时会重置覆盖开关，有未全部导出的通道编辑时会提示。窗口尺寸、面板比例及最近使用目录保存在本机 Qt 设置中。界面按启动时的系统配色选择浅色或深色主题。
+
+模块职责、此次整理的问题及人工检查项目见[架构与界面整理记录](docs/log/ARCHITECTURE_AND_UI_REVIEW.md)。
 
 ## 验收状态
 
@@ -188,7 +257,9 @@ CLI 显式填写的值优先于 Profile。例如显式 `--fs` 替换 Profile 的
 
 第二阶段加入文本建议、Profile 与实验性 NIED ASCII 读取。正式波形样本、运行回归和界面操作待验收。PEER VT2/DT2、COSMOS 和 USGS SMC 的调查范围见[第二阶段样本与开发记录](docs/validation/GMTOOLS_PHASE2_RESULTS.md)。
 
-第三阶段的运行证据、样本来源与待验收范围见[第三阶段验收记录](docs/validation/GMTOOLS_PHASE3_RESULTS.md)。实施范围见[第三阶段开发文档](docs/GMTOOLS_PHASE3_DEVELOPMENT.md)。
+第三阶段的运行证据、样本来源与待验收范围见[第三阶段验收记录](docs/validation/GMTOOLS_PHASE3_RESULTS.md)。实施范围见[第三阶段开发文档](docs/5.GMTOOLS_PHASE3_DEVELOPMENT.md)。
+
+第四阶段加入界面国际化、程序设置、转换预设与顺序批量转换。实施范围见[第四阶段开发文档](docs/6.GMTOOLS_PHASE4_DEVELOPMENT.md)，当前构建、运行与未完成项见[第四阶段验收记录](docs/validation/GMTOOLS_PHASE4_RESULTS.md)。
 
 ### 本地复核
 

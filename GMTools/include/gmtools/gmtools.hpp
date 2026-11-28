@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <span>
@@ -155,6 +156,69 @@ struct FormatInfo {
     std::string_view notes;
 };
 
+// A channel selection applies after a file has been read and calibrated, so it
+// can only rely on explicitly known physical quantities, never on names.
+enum class ChannelSelectionMode { All, Quantity };
+
+struct ChannelSelection {
+    ChannelSelectionMode mode{ChannelSelectionMode::All};
+    Quantity quantity{Quantity::Unknown}; // required when mode is Quantity
+};
+
+// A reusable, shareable conversion recipe. It carries no paths, waveform data,
+// per-file identity edits, or overwrite permission.
+struct ConversionPreset {
+    std::string name;
+    ReadOptions read;
+    WriteOptions write;
+    ChannelSelection selection;
+};
+
+struct PresetResult {
+    ConversionPreset preset;
+    Diagnostics diagnostics;
+};
+
+enum class BatchFileState { Pending, Running, Succeeded, Failed, Partial, Cancelled };
+
+struct BatchOptions {
+    std::vector<std::filesystem::path> inputs;
+    ConversionPreset preset;     // already merged with any explicit settings
+    std::filesystem::path output_directory;
+    bool overwrite{};
+};
+
+struct BatchFileResult {
+    std::filesystem::path input;
+    BatchFileState state{BatchFileState::Pending};
+    std::vector<std::filesystem::path> written;
+    std::size_t channels_read{};
+    std::size_t channels_selected{};
+    std::string stage; // last reached stage, for failure reporting
+    Diagnostics diagnostics;
+};
+
+struct BatchSummary {
+    std::size_t total{};
+    std::size_t succeeded{};
+    std::size_t partial{};
+    std::size_t failed{};
+    std::size_t cancelled{};
+    std::size_t files_written{};
+    bool stopped{};
+};
+
+struct BatchResult {
+    std::vector<BatchFileResult> files;
+    BatchSummary summary;
+    Diagnostics diagnostics; // batch-level problems, e.g. an unusable output directory
+};
+
+// Called after every observable state change of a file. The reference is valid
+// for the duration of the call only.
+using BatchProgress = std::function<void(const BatchResult&)>;
+using BatchStop = std::function<bool()>;
+
 std::vector<FormatInfo> formats();
 std::optional<FormatId> format_from_name(std::string_view name);
 std::string_view name(FormatId format);
@@ -162,8 +226,17 @@ std::string_view name(Quantity quantity);
 std::string_view name(Unit unit);
 std::string_view name(Layout layout);
 std::string_view name(Delimiter delimiter);
+std::string_view name(Calibration calibration);
+std::string_view name(TextHeader header);
+std::string_view name(MseedEncoding encoding);
+std::string_view name(ChannelSelectionMode mode);
+std::string_view name(BatchFileState state);
 std::optional<Layout> layout_from_name(std::string_view value);
 std::optional<Delimiter> delimiter_from_name(std::string_view value);
+std::optional<Calibration> calibration_from_name(std::string_view value);
+std::optional<TextHeader> text_header_from_name(std::string_view value);
+std::optional<MseedEncoding> mseed_encoding_from_name(std::string_view value);
+std::optional<ChannelSelectionMode> selection_mode_from_name(std::string_view value);
 std::optional<Quantity> quantity_from_name(std::string_view value);
 std::optional<Unit> unit_from_name(std::string_view value);
 std::optional<double> parse_number(std::string_view word);
@@ -188,11 +261,18 @@ Diagnostics save_profile(const std::filesystem::path& path, const ReadOptions& o
                          bool overwrite = false, const std::filesystem::path& protected_input = {});
 ProfileResult merge_profile(const ReadOptions& profile, const ReadOptions& explicit_options,
                             bool explicit_format = false, bool explicit_delimiter = false);
+PresetResult decode_preset(std::string_view json);
+std::string encode_preset(const ConversionPreset& preset);
+PresetResult load_preset(const std::filesystem::path& path);
+Diagnostics save_preset(const std::filesystem::path& path, const ConversionPreset& preset,
+                        bool overwrite = false, const std::filesystem::path& protected_input = {});
 ReadResult read(std::span<const std::byte> bytes, const ReadOptions& options = {});
 Diagnostics apply_overrides(Trace& trace, const Overrides& overrides);
 WriteResult write(const Trace& trace, const WriteOptions& options);
 ExportResult export_file(const FileData& data, const std::filesystem::path& input,
                          const ExportOptions& options);
+BatchResult convert_batch(const BatchOptions& options, const BatchProgress& progress = {},
+                          const BatchStop& stop = {});
 
 std::filesystem::path path_from_utf8(std::string_view value);
 std::string path_to_utf8(const std::filesystem::path& value);

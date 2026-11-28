@@ -1,0 +1,22 @@
+{
+  "kind": "gmtools-conversion-preset",
+  "schema_version": 1,
+  "name": "Time series CSV with metadata header",
+  "read": {
+    "format": "auto",
+    "text": {
+      "layout": "columnar",
+      "time_column": 1
+    }
+  },
+  "write": {
+    "format": "csv",
+    "text_layout": "elapsed-time",
+    "text_header": "metadata",
+    "text_delimiter": "comma",
+    "precision": 6
+  },
+  "selection": {
+    "mode": "all"
+  }
+}

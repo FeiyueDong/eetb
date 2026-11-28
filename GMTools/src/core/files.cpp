@@ -1,6 +1,7 @@
 #include "detail.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <fstream>
@@ -217,17 +218,47 @@ InputFile load_file(const fs::path& path) {
     return result;
 }
 
-ExportResult export_file(const FileData& data, const fs::path& input, const ExportOptions& options) {
-    ExportResult result;
+namespace detail {
+
+bool same_location(const fs::path& left, const fs::path& right) {
+    if (left.empty() || right.empty())
+        return false;
+    std::error_code ec;
+    if (fs::exists(left, ec) && !ec && fs::exists(right, ec) && !ec &&
+        fs::equivalent(left, right, ec) && !ec)
+        return true;
+    const auto canonical = [](const fs::path& value) {
+        std::error_code inner;
+        auto result = fs::weakly_canonical(value, inner);
+        if (inner) {
+            inner.clear();
+            result = fs::absolute(value, inner);
+        }
+        if (inner)
+            result = value;
+        return result.lexically_normal();
+    };
+    const auto canonical_left = canonical(left);
+    const auto canonical_right = canonical(right);
+#ifdef _WIN32
+    return detail::lower(path_to_utf8(canonical_left)) == detail::lower(path_to_utf8(canonical_right));
+#else
+    return canonical_left == canonical_right;
+#endif
+}
+
+std::optional<OutputPlan> plan_outputs(const FileData& data, const fs::path& input,
+                                       const ExportOptions& options, Diagnostics& diagnostics) {
     const auto known = formats();
-    const auto target_format = std::ranges::find_if(known, [&](const auto& item) { return item.id == options.writer.format; });
+    const auto target_format =
+        std::ranges::find_if(known, [&](const auto& item) { return item.id == options.writer.format; });
     if (target_format == known.end() || !target_format->writable) {
-        detail::error(result.diagnostics, "output", "target format is not writable in this build");
-        return result;
+        error(diagnostics, "output", "target format is not writable in this build");
+        return {};
     }
     if (options.output.empty() || data.traces.empty()) {
-        detail::error(result.diagnostics, "output", "an output path and at least one trace are required");
-        return result;
+        error(diagnostics, "output", "an output path and at least one trace are required");
+        return {};
     }
 
     auto channels = options.channels;
@@ -238,8 +269,8 @@ ExportResult export_file(const FileData& data, const fs::path& input, const Expo
     std::set<std::size_t> distinct;
     for (const auto channel : channels) {
         if (channel == 0 || channel > data.traces.size() || !distinct.insert(channel).second) {
-            detail::error(result.diagnostics, "output", "invalid or repeated channel index " + std::to_string(channel));
-            return result;
+            error(diagnostics, "output", "invalid or repeated channel index " + std::to_string(channel));
+            return {};
         }
     }
 
@@ -247,55 +278,108 @@ ExportResult export_file(const FileData& data, const fs::path& input, const Expo
     std::error_code ec;
     const bool output_is_directory = fs::is_directory(output, ec);
     if (ec && ec != std::errc::no_such_file_or_directory) {
-        detail::error(result.diagnostics, "output", path_to_utf8(output) + ": " + ec.message());
-        return result;
+        error(diagnostics, "output", path_to_utf8(output) + ": " + ec.message());
+        return {};
     }
     const auto suffix = detail::lower(path_to_utf8(output.extension()));
     const bool named_file = !output_is_directory &&
         (suffix == target_format->extension || format_from_name(suffix) == options.writer.format);
     if (named_file && channels.size() != 1) {
-        detail::error(result.diagnostics, "output", "multiple traces require an output directory");
-        return result;
+        error(diagnostics, "output", "multiple traces require an output directory");
+        return {};
     }
-    auto directory = named_file ? output.parent_path() : output;
-    if (directory.empty())
-        directory = fs::path{"."};
 
-    std::vector<fs::path> paths;
+    OutputPlan plan;
+    plan.format = options.writer.format;
+    plan.named_file = named_file;
+    plan.channels = std::move(channels);
+    plan.directory = named_file ? output.parent_path() : output;
+    if (plan.directory.empty())
+        plan.directory = fs::path{"."};
+
     const auto labels = channel_names(data);
     const auto stem = safe_component(path_to_utf8(input.stem()), "record");
-    for (const auto channel : channels) {
-        paths.push_back(named_file ? output : directory / path_from_utf8(
-            stem + "_" + labels[channel - 1] + std::string{target_format->extension}));
-        if (!writable_target(paths.back(), input, options.overwrite, result.diagnostics))
-            return result;
-    }
+    for (const auto channel : plan.channels)
+        plan.targets.push_back(named_file ? output
+                                          : plan.directory / path_from_utf8(
+                                                stem + "_" + labels[channel - 1] +
+                                                std::string{target_format->extension}));
+    return plan;
+}
 
-    ec.clear();
-    fs::create_directories(directory, ec);
-    if (ec) {
-        detail::error(result.diagnostics, "output", path_to_utf8(directory) + ": " + ec.message());
-        return result;
+bool validate_targets(const OutputPlan& plan, std::span<const fs::path> protected_paths, bool overwrite,
+                      std::span<const fs::path> reserved, Diagnostics& diagnostics,
+                      std::string_view protected_reason) {
+    for (const auto& target : plan.targets) {
+        std::error_code ec;
+        const auto status = fs::symlink_status(target, ec);
+        const bool missing = status.type() == fs::file_type::not_found &&
+                             (!ec || ec == std::errc::no_such_file_or_directory);
+        const auto label = path_to_utf8(target);
+        if (!missing) {
+            if (ec) {
+                error(diagnostics, "output", label + ": " + ec.message());
+                return false;
+            }
+            if (!fs::is_regular_file(status)) {
+                error(diagnostics, "output", label + ": target exists and is not a regular file");
+                return false;
+            }
+        }
+        for (const auto& protected_path : protected_paths) {
+            if (same_location(target, protected_path)) {
+                error(diagnostics, "output", label + ": " + std::string{protected_reason});
+                return false;
+            }
+        }
+        for (const auto& claimed : reserved) {
+            if (same_location(target, claimed)) {
+                error(diagnostics, "output",
+                      label + ": target is also produced by another file in this batch");
+                return false;
+            }
+        }
+        if (!missing && !overwrite) {
+            error(diagnostics, "output", label + ": target already exists; choose a new path or enable overwrite");
+            return false;
+        }
     }
-    StagingDirectory stage;
-    if (!make_stage(stage, directory, result.diagnostics))
-        return result;
+    return true;
+}
+
+std::vector<fs::path> publish_outputs(const FileData& data, const OutputPlan& plan,
+                                      const WriteOptions& writer, bool overwrite,
+                                      Diagnostics& diagnostics, std::string* stage) {
+    std::vector<fs::path> written;
+    if (stage)
+        *stage = "publish";
+    std::error_code ec;
+    fs::create_directories(plan.directory, ec);
+    if (ec) {
+        error(diagnostics, "output", path_to_utf8(plan.directory) + ": " + ec.message());
+        return written;
+    }
+    StagingDirectory stage_directory;
+    if (!make_stage(stage_directory, plan.directory, diagnostics))
+        return written;
 
     if (!data.attributes.empty())
-        detail::warn(result.diagnostics, "output", "source file-level format attributes are not exported");
+        warn(diagnostics, "output", "source file-level format attributes are not exported");
 
+    if (stage)
+        *stage = "encode";
     std::vector<fs::path> staged;
-    for (std::size_t i = 0; i < channels.size(); ++i) {
-        const auto channel = channels[i];
-        auto encoded = write(data.traces[channel - 1], options.writer);
+    for (std::size_t i = 0; i < plan.channels.size(); ++i) {
+        const auto channel = plan.channels[i];
+        auto encoded = write(data.traces[channel - 1], writer);
         for (auto& diagnostic : encoded.diagnostics) {
             diagnostic.channel = channel;
-            result.diagnostics.push_back(std::move(diagnostic));
+            diagnostics.push_back(std::move(diagnostic));
         }
-        if (has_errors(result.diagnostics))
-            return result;
+        if (has_errors(diagnostics))
+            return written;
 
-        staged.push_back(stage.path / std::to_string(i + 1));
+        staged.push_back(stage_directory.path / std::to_string(i + 1));
         std::ofstream stream(staged.back(), std::ios::binary | std::ios::trunc);
         if (stream && encoded.bytes.size() <= static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
             stream.write(reinterpret_cast<const char*>(encoded.bytes.data()),
@@ -305,27 +389,43 @@ ExportResult export_file(const FileData& data, const fs::path& input, const Expo
             stream.setstate(std::ios::failbit);
         }
         if (!stream) {
-            detail::error(result.diagnostics, "output", path_to_utf8(paths[i]) + ": could not stage the encoded file");
-            return result;
+            error(diagnostics, "output", path_to_utf8(plan.targets[i]) + ": could not stage the encoded file");
+            return written;
         }
     }
 
-    result.written.reserve(paths.size());
-    for (std::size_t i = 0; i < paths.size(); ++i) {
-        if (!writable_target(paths[i], input, options.overwrite, result.diagnostics))
+    if (stage)
+        *stage = "publish";
+    written.reserve(plan.targets.size());
+    for (std::size_t i = 0; i < plan.targets.size(); ++i) {
+        if (!validate_targets(plan, {}, overwrite, {}, diagnostics))
             break;
         ec.clear();
-        publish(staged[i], paths[i], options.overwrite, ec);
+        publish(staged[i], plan.targets[i], overwrite, ec);
         if (ec) {
-            detail::error(result.diagnostics, "output", path_to_utf8(paths[i]) + ": " + ec.message());
+            error(diagnostics, "output", path_to_utf8(plan.targets[i]) + ": " + ec.message());
             break;
         }
-        result.written.push_back(std::move(paths[i]));
+        written.push_back(plan.targets[i]);
     }
-    if (result.written.size() != paths.size() && !result.written.empty()) {
-        detail::error(result.diagnostics, "output", "publication stopped after writing " +
-                      std::to_string(result.written.size()) + " of " + std::to_string(paths.size()) + " files");
+    if (written.size() != plan.targets.size() && !written.empty()) {
+        error(diagnostics, "output", "publication stopped after writing " +
+                      std::to_string(written.size()) + " of " + std::to_string(plan.targets.size()) + " files");
     }
+    return written;
+}
+
+} // namespace detail
+
+ExportResult export_file(const FileData& data, const fs::path& input, const ExportOptions& options) {
+    ExportResult result;
+    const auto plan = detail::plan_outputs(data, input, options, result.diagnostics);
+    if (!plan)
+        return result;
+    const std::array protected_paths{input};
+    if (!detail::validate_targets(*plan, protected_paths, options.overwrite, {}, result.diagnostics))
+        return result;
+    result.written = detail::publish_outputs(data, *plan, options.writer, options.overwrite, result.diagnostics);
     return result;
 }
 

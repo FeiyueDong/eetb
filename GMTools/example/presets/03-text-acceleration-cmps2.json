@@ -1,0 +1,18 @@
+{
+  "kind": "gmtools-conversion-preset",
+  "schema_version": 1,
+  "name": "Text acceleration in cm/s2",
+  "read": {
+    "format": "text",
+    "overrides": {
+      "quantity": "acceleration",
+      "unit": "cm/s2"
+    }
+  },
+  "write": {
+    "format": "text"
+  },
+  "selection": {
+    "mode": "all"
+  }
+}

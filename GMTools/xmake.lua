@@ -81,6 +81,7 @@ target("gmtools_core")
     add_includedirs("include", {public = true})
     add_packages("nlohmann_json")
     add_files("src/core/data.cpp", "src/core/metadata.cpp", "src/core/files.cpp", "src/core/profile.cpp",
+              "src/core/preset.cpp", "src/core/batch.cpp",
               "src/formats/registry.cpp", "src/formats/text.cpp", "src/formats/text_provenance.cpp", "src/formats/peer.cpp",
               "src/formats/modified_mseed.cpp", "src/formats/knet.cpp", "src/formats/sac.cpp")
     if has_config("enable_mseed") then
@@ -110,7 +111,28 @@ if has_config("build_gui") then
         add_deps("gmtools_core")
         add_frameworks("QtConcurrent")
         add_files("src/gui/main.cpp", "src/gui/export_options.cpp", "src/gui/main_window.cpp", "src/gui/parse_dialog.cpp",
-                  "src/gui/plot.cpp", "src/gui/theme.cpp", "src/gui/ui_helpers.cpp")
+                  "src/gui/plot.cpp", "src/gui/theme.cpp", "src/gui/ui_helpers.cpp",
+                  "src/gui/localization.cpp", "src/gui/settings.cpp", "src/gui/settings_dialog.cpp",
+                  "src/gui/preset_store.cpp", "src/gui/preset_dialog.cpp", "src/gui/batch_dialog.cpp")
+        add_files("src/gui/*.hpp")
+        after_build(function (target)
+            import("lib.detect.find_program")
+            local ts = path.join(os.projectdir(), "translations", "gmtools_zh_CN.ts")
+            local outdir = path.join(target:targetdir(), "translations")
+            local qm = path.join(outdir, "gmtools_zh_CN.qm")
+            local lrelease = find_program("lrelease")
+            if not lrelease then
+                local qt = get_config("qt")
+                if qt then
+                    local candidate = path.join(qt, "bin", is_host("windows") and "lrelease.exe" or "lrelease")
+                    if os.isfile(candidate) then lrelease = candidate end
+                end
+            end
+            assert(lrelease, "lrelease was not found; install the Qt Linguist tools or pass --qt=/path/to/Qt")
+            assert(os.isfile(ts), "translations/gmtools_zh_CN.ts is missing")
+            os.mkdir(outdir)
+            os.execv(lrelease, {ts, "-qm", qm})
+        end)
         on_config(function (target)
             import("core.base.semver")
             local qt = target:data("qt")

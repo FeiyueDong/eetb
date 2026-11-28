@@ -7,8 +7,10 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLineEdit>
+#include <QCoreApplication>
 
 namespace gmtools::gui {
+
 
 class OverrideFields {
 public:
@@ -17,18 +19,18 @@ public:
         sampling_ = new QLineEdit;
         sampling_->setPlaceholderText(keep);
         sampling_kind_ = new QComboBox;
-        sampling_kind_->addItems({QStringLiteral("dt (s)"), QStringLiteral("fs (Hz)")});
+        sampling_kind_->addItems({QCoreApplication::translate("gmtools::gui::OverrideFields", "dt (s)"), QCoreApplication::translate("gmtools::gui::OverrideFields", "fs (Hz)")});
         auto* timing = new QHBoxLayout;
         timing->addWidget(sampling_kind_);
         timing->addWidget(sampling_);
-        form->addRow(QStringLiteral("Sampling"), timing);
+        form->addRow(QCoreApplication::translate("gmtools::gui::OverrideFields", "Sampling"), timing);
 
         quantity_ = new QComboBox;
         quantity_->addItem(keep);
         for (const auto value : {Quantity::Unknown, Quantity::Acceleration, Quantity::Velocity,
                                  Quantity::Displacement, Quantity::Counts})
             quantity_->addItem(as_text(name(value)), static_cast<int>(value));
-        form->addRow(QStringLiteral("Quantity"), quantity_);
+        form->addRow(QCoreApplication::translate("gmtools::gui::OverrideFields", "Quantity"), quantity_);
 
         unit_ = new QComboBox;
         const auto update_units = [this, keep] {
@@ -45,12 +47,19 @@ public:
         };
         QObject::connect(quantity_, &QComboBox::currentIndexChanged, unit_, update_units);
         update_units();
-        form->addRow(QStringLiteral("Input unit"), unit_);
-        unit_->setToolTip(QStringLiteral("Assign the unit of the existing samples. This does not convert their values."));
-        sampling_->setAccessibleName(QStringLiteral("Sampling interval or rate"));
-        sampling_kind_->setAccessibleName(QStringLiteral("Sampling input type"));
+        form->addRow(QCoreApplication::translate("gmtools::gui::OverrideFields", "Input unit"), unit_);
+        unit_->setToolTip(QCoreApplication::translate("gmtools::gui::OverrideFields", "Assign the unit of the existing samples. This does not convert their values."));
+        sampling_->setAccessibleName(QCoreApplication::translate("gmtools::gui::OverrideFields", "Sampling interval or rate"));
+        sampling_kind_->setAccessibleName(QCoreApplication::translate("gmtools::gui::OverrideFields", "Sampling input type"));
         form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
         set_options(initial);
+    }
+
+    void set_enabled(bool enabled) {
+        sampling_->setEnabled(enabled);
+        sampling_kind_->setEnabled(enabled);
+        quantity_->setEnabled(enabled);
+        unit_->setEnabled(enabled);
     }
 
     void set_options(const Overrides& options) {

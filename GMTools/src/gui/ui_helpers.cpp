@@ -1,5 +1,6 @@
 #include "ui_helpers.hpp"
 
+#include <QCoreApplication>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QStringList>
@@ -37,13 +38,13 @@ QPlainTextEdit* read_only_text(QWidget* parent) {
 
 QString trace_title(const Trace& trace, std::size_t channel) {
     return QStringLiteral("%1   %2").arg(channel)
-        .arg(trace.name.empty() ? QStringLiteral("Unnamed") : as_text(trace.name));
+        .arg(trace.name.empty() ? QCoreApplication::translate("gmtools::gui::TraceInfo", "Unnamed") : as_text(trace.name));
 }
 
 QString timing_unit(const Trace& trace) {
     const auto dt = trace.dt_seconds ? displayed_number(*trace.dt_seconds) + QStringLiteral(" s")
-                                     : QStringLiteral("unknown");
-    return QStringLiteral("%1 samples, dt %2, %3")
+                                     : QCoreApplication::translate("gmtools::gui::TraceInfo", "unknown");
+    return QCoreApplication::translate("gmtools::gui::TraceInfo", "%1 samples, dt %2, %3")
         .arg(trace.samples.size()).arg(dt).arg(as_text(name(trace.unit)));
 }
 

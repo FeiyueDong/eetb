@@ -1,6 +1,7 @@
 #include "plot.hpp"
 #include "ui_helpers.hpp"
 
+#include <QCoreApplication>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPalette>
@@ -45,15 +46,15 @@ TracePlot::TracePlot(const Trace& trace, PlotData data, std::size_t channel, QWi
     setMinimumWidth(260);
     setFixedHeight(218);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    setToolTip(QStringLiteral("Waveform overview · peaks are preserved in the display envelope.\n"
-                              "Export uses the original samples."));
+    setToolTip(QCoreApplication::translate("gmtools::gui::TracePlot",
+        "Waveform overview · peaks are preserved in the display envelope.\nExport uses the original samples."));
 }
 
 void TracePlot::set_metadata(const Trace& trace) {
-    name_ = trace.name.empty() ? QStringLiteral("Unnamed channel") : as_text(trace.name);
+    name_ = trace.name.empty() ? QCoreApplication::translate("gmtools::gui::TracePlot", "Unnamed channel") : as_text(trace.name);
     unit_ = as_text(gmtools::name(trace.unit));
     span_ = trace.sample_span();
-    setAccessibleName(QStringLiteral("Channel %1: %2 waveform").arg(channel_).arg(name_));
+    setAccessibleName(QCoreApplication::translate("gmtools::gui::TracePlot", "Channel %1: %2 waveform").arg(channel_).arg(name_));
     update();
 }
 
@@ -80,7 +81,7 @@ void TracePlot::paintEvent(QPaintEvent*) {
     painter.setFont(font());
     painter.setPen(palette().placeholderText().color());
     painter.drawText(QRect(16, 34, width() - 32, 20), Qt::AlignVCenter,
-        painter.fontMetrics().elidedText(QStringLiteral("%1 samples  ·  %2")
+        painter.fontMetrics().elidedText(QCoreApplication::translate("gmtools::gui::TracePlot", "%1 samples  ·  %2")
             .arg(data_.sample_count).arg(unit_), Qt::ElideRight, width() - 32));
 
     const auto low_label = number(data_.minimum);
@@ -108,7 +109,7 @@ void TracePlot::paintEvent(QPaintEvent*) {
     painter.drawText(QRectF(area.left(), area.bottom() + 8, area.width(), 18), Qt::AlignRight,
                      span_ ? number(*span_) : QString::number(data_.sample_count));
     painter.drawText(QRectF(area.left(), area.bottom() + 25, area.width(), 18), Qt::AlignHCenter,
-                     span_ ? QStringLiteral("Elapsed time (s)") : QStringLiteral("Sample index"));
+                     span_ ? QCoreApplication::translate("gmtools::gui::TracePlot", "Elapsed time (s)") : QCoreApplication::translate("gmtools::gui::TracePlot", "Sample index"));
 
     const auto scale = std::max(std::abs(data_.minimum), std::abs(data_.maximum));
     const auto y = [&](double value) {

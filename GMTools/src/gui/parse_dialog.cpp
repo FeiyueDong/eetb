@@ -2,6 +2,7 @@
 #include "background_task.hpp"
 #include "override_fields.hpp"
 #include <QCheckBox>
+#include <QCoreApplication>
 #include "ui_helpers.hpp"
 
 #include <QProgressBar>
@@ -42,19 +43,24 @@ struct ParsePreview {
 
 class ParseDialog final : public QDialog {
 public:
+    // Context-qualified translation so the extracted .ts context matches at runtime.
+    static QString tr(const char* source) {
+        return QCoreApplication::translate("gmtools::gui::ParseDialog", source);
+    }
+
     ParseDialog(std::shared_ptr<const InputFile> bytes, std::filesystem::path input, const ReadOptions& original,
                 QWidget* parent)
         : QDialog(parent), bytes_(std::move(bytes)), input_(std::move(input)),
           extension_(path_to_utf8(input_.extension())) {
-        setWindowTitle(QStringLiteral("Import · %1").arg(as_text(path_to_utf8(input_.filename()))));
+        setWindowTitle(tr("Import · %1").arg(as_text(path_to_utf8(input_.filename()))));
         resize(1040, 740);
         auto* outer = new QVBoxLayout(this);
         outer->setContentsMargins(20, 18, 20, 18);
         outer->setSpacing(12);
-        auto* title = new QLabel(QStringLiteral("Interpret your record"), this);
+        auto* title = new QLabel(tr("Interpret your record"), this);
         title->setProperty("role", "heading");
         outer->addWidget(title);
-        auto* intro = new QLabel(QStringLiteral("Check the source, preview the channels, then import. Line and column numbers start at 1."), this);
+        auto* intro = new QLabel(tr("Check the source, preview the channels, then import. Line and column numbers start at 1."), this);
         intro->setProperty("role", "muted");
         intro->setWordWrap(true);
         outer->addWidget(intro);
@@ -73,35 +79,35 @@ public:
         settings->setSpacing(14);
         auto* preset = new QFormLayout;
         format_ = new QComboBox;
-        format_->addItem(QStringLiteral("Automatic"), static_cast<int>(FormatId::Auto));
+        format_->addItem(tr("Automatic"), static_cast<int>(FormatId::Auto));
         for (const auto& item : formats()) {
             if (item.readable)
                 format_->addItem(as_text(item.name), static_cast<int>(item.id));
         }
         format_->setCurrentIndex(format_->findData(static_cast<int>(original.format)));
-        preset->addRow(QStringLiteral("Input format"), format_);
+        preset->addRow(tr("Input format"), format_);
         settings->addLayout(preset);
 
-        text_group_ = new QGroupBox(QStringLiteral("Text data"));
+        text_group_ = new QGroupBox(tr("Text data"));
         auto* text_form = new QFormLayout(text_group_);
-        first_ = line_field(text_form, QStringLiteral("First data line"), QStringLiteral("Automatic"));
-        last_ = line_field(text_form, QStringLiteral("Last data line"), QStringLiteral("End of file"));
+        first_ = line_field(text_form, tr("First data line"), tr("Automatic"));
+        last_ = line_field(text_form, tr("Last data line"), tr("End of file"));
         layout_ = new QComboBox;
-        layout_->addItems({QStringLiteral("Format default"), QStringLiteral("Sequential"), QStringLiteral("Columnar")});
+        layout_->addItems({tr("Format default"), tr("Sequential"), tr("Columnar")});
         layout_->setToolTip(QStringLiteral("Sequential: values continue across each row into one channel.\n"
                                           "Columnar: each selected column is a separate channel."));
-        text_form->addRow(QStringLiteral("Layout"), layout_);
+        text_form->addRow(tr("Layout"), layout_);
         delimiter_ = new QComboBox;
-        delimiter_->addItems({QStringLiteral("Automatic"), QStringLiteral("Whitespace"), QStringLiteral("Comma"), QStringLiteral("Tab")});
-        text_form->addRow(QStringLiteral("Delimiter"), delimiter_);
-        columns_ = line_field(text_form, QStringLiteral("Data columns"), QStringLiteral("All except time, e.g. 2,3"));
-        time_ = line_field(text_form, QStringLiteral("Time column"), QStringLiteral("Values in seconds"));
+        delimiter_->addItems({tr("Automatic"), tr("Whitespace"), tr("Comma"), tr("Tab")});
+        text_form->addRow(tr("Delimiter"), delimiter_);
+        columns_ = line_field(text_form, tr("Data columns"), tr("All except time, e.g. 2,3"));
+        time_ = line_field(text_form, tr("Time column"), tr("Values in seconds"));
         settings->addWidget(text_group_);
 
-        auto* override_group = new QGroupBox(QStringLiteral("Source parameter overrides"));
+        auto* override_group = new QGroupBox(tr("Source parameter overrides"));
         auto* override_form = new QFormLayout(override_group);
         overrides_ = std::make_unique<OverrideFields>(override_form, original.overrides);
-        factor_ = line_field(override_form, QStringLiteral("Numeric factor"), QStringLiteral("Optional sample multiplier"));
+        factor_ = line_field(override_form, tr("Numeric factor"), tr("Optional sample multiplier"));
         factor_->setToolTip("Multiply decoded samples after any instrument calibration.");
         calibration_ = new QComboBox;
         calibration_->addItems(
@@ -139,8 +145,8 @@ public:
         profile_bar_ = new QWidget(parameters);
         auto* profile_buttons = new QHBoxLayout(profile_bar_);
         profile_buttons->setContentsMargins(0, 0, 0, 0);
-        auto* load = new QPushButton(QStringLiteral("Load profile…"), profile_bar_);
-        auto* save = new QPushButton(QStringLiteral("Save profile…"), profile_bar_);
+        auto* load = new QPushButton(tr("Load profile…"), profile_bar_);
+        auto* save = new QPushButton(tr("Save profile…"), profile_bar_);
         profile_buttons->addWidget(load);
         profile_buttons->addWidget(save);
         settings->addWidget(profile_bar_);
@@ -154,7 +160,7 @@ public:
         raw_view_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
         raw_view_->setLineWrapMode(QPlainTextEdit::NoWrap);
         preview_layout->addWidget(raw_view_, 3);
-        preview_layout->addWidget(new QLabel(QStringLiteral("Parsing feedback"), preview));
+        preview_layout->addWidget(new QLabel(tr("Parsing feedback"), preview));
         feedback_ = read_only_text(preview);
         preview_layout->addWidget(feedback_, 2);
         panes->setStretchFactor(1, 1);
@@ -169,10 +175,10 @@ public:
 
         buttons_ = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
         auto* buttons = buttons_;
-        buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Import channels"));
+        buttons->button(QDialogButtonBox::Ok)->setText(tr("Import channels"));
         buttons->button(QDialogButtonBox::Ok)->setProperty("role", "primary");
-        apply_suggestions_ = buttons->addButton(QStringLiteral("Apply text suggestions"), QDialogButtonBox::ActionRole);
-        auto* check = buttons->addButton(QStringLiteral("Preview parse"), QDialogButtonBox::ActionRole);
+        apply_suggestions_ = buttons->addButton(tr("Apply text suggestions"), QDialogButtonBox::ActionRole);
+        auto* check = buttons->addButton(tr("Preview parse"), QDialogButtonBox::ActionRole);
         outer->addWidget(buttons);
         connect(load, &QPushButton::clicked, this, [this] { choose_profile(); });
         connect(save, &QPushButton::clicked, this, [this] { store_profile(); });
@@ -192,7 +198,7 @@ public:
         if (const auto* display = screen())
             resize(size().boundedTo(display->availableGeometry().size()));
         set_busy(true);
-        feedback_->setPlainText(QStringLiteral("Inspecting the source file…"));
+        feedback_->setPlainText(tr("Inspecting the source file…"));
         QTimer::singleShot(0, this, [this] {
             run_background(this, [bytes = bytes_, extension = extension_] {
                 return std::pair{text_view(bytes->bytes), detect_input_format(bytes->bytes, extension)};
@@ -304,8 +310,8 @@ private:
     }
 
     void choose_profile() {
-        const auto selected = QFileDialog::getOpenFileName(this, QStringLiteral("Load text profile"), {},
-                                                           QStringLiteral("JSON profiles (*.json);;All files (*)"));
+        const auto selected = QFileDialog::getOpenFileName(this, tr("Load text profile"), {},
+                                                           tr("JSON profiles (*.json);;All files (*)"));
         if (selected.isEmpty())
             return;
         try {
@@ -324,9 +330,9 @@ private:
     }
 
     void store_profile() {
-        QFileDialog dialog(this, QStringLiteral("Save text profile"));
+        QFileDialog dialog(this, tr("Save text profile"));
         dialog.setAcceptMode(QFileDialog::AcceptSave);
-        dialog.setNameFilter(QStringLiteral("JSON profiles (*.json)"));
+        dialog.setNameFilter(tr("JSON profiles (*.json)"));
         dialog.setDefaultSuffix(QStringLiteral("json"));
         dialog.setOption(QFileDialog::DontConfirmOverwrite);
         if (dialog.exec() != QDialog::Accepted)
@@ -334,14 +340,14 @@ private:
         try {
             const auto path = path_from_utf8(as_utf8(dialog.selectedFiles().front()));
             const bool overwrite = std::filesystem::exists(path);
-            if (overwrite && QMessageBox::question(this, QStringLiteral("Replace profile"),
-                    QStringLiteral("Replace the existing file %1?").arg(as_text(path_to_utf8(path)))) != QMessageBox::Yes)
+            if (overwrite && QMessageBox::question(this, tr("Replace profile"),
+                    tr("Replace the existing file %1?").arg(as_text(path_to_utf8(path)))) != QMessageBox::Yes)
                 return;
             const auto diagnostics = save_profile(path, options(), overwrite, input_);
             if (has_errors(diagnostics))
                 feedback_->setPlainText(diagnostic_text(diagnostics));
             else
-                feedback_->appendPlainText(QStringLiteral("Saved profile %1").arg(as_text(path_to_utf8(path))));
+                feedback_->appendPlainText(tr("Saved profile %1").arg(as_text(path_to_utf8(path))));
         } catch (const std::exception& problem) {
             feedback_->setPlainText(as_text(problem.what()));
         }
@@ -367,7 +373,7 @@ private:
 
     void show_raw(std::size_t highlight) {
         if (!raw_) {
-            raw_label_->setText(QStringLiteral("Record headers"));
+            raw_label_->setText(tr("Record headers"));
             QString headers;
             if (preview_) {
                 for (const auto& trace : preview_->parsed.data.traces) {
@@ -382,7 +388,7 @@ private:
                 }
             }
             raw_view_->setPlainText(headers.isEmpty()
-                                        ? QStringLiteral("Preview the file to inspect decoded headers.")
+                                        ? tr("Preview the file to inspect decoded headers.")
                                         : headers.trimmed());
             return;
         }
@@ -403,8 +409,8 @@ private:
                     --visible_size;
                 auto content = as_text(line.substr(0, visible_size));
                 if (visible_size < line.size())
-                    content += QStringLiteral("…");
-                visible << QStringLiteral("%1  %2").arg(row, 6).arg(content);
+                    content += tr("…");
+                visible << tr("%1  %2").arg(row, 6).arg(content);
             }
             if (end == rest.npos)
                 rest = {};
@@ -413,8 +419,8 @@ private:
         }
         raw_view_->setPlainText(visible.join('\n'));
         const auto visible_lines = static_cast<std::size_t>(visible.size());
-        raw_label_->setText(visible.isEmpty() ? QStringLiteral("Raw preview")
-            : QStringLiteral("Raw preview · lines %1–%2").arg(first).arg(first + visible_lines - 1));
+        raw_label_->setText(visible.isEmpty() ? tr("Raw preview")
+            : tr("Raw preview · lines %1–%2").arg(first).arg(first + visible_lines - 1));
 
         if (!visible.isEmpty() && highlight >= first &&
             highlight - first < visible_lines) {
@@ -441,7 +447,7 @@ private:
         if (!raw_)
             show_raw(0);
         apply_suggestions_->setEnabled(false);
-        feedback_->setPlainText(QStringLiteral("Settings changed. Choose Preview parse or Import channels to apply them."));
+        feedback_->setPlainText(tr("Settings changed. Choose Preview parse or Import channels to apply them."));
     }
 
     void preview_parse(bool confirm) {
@@ -455,7 +461,7 @@ private:
             used_ = options();
             preview_.reset();
             set_busy(true);
-            feedback_->setPlainText(QStringLiteral("Parsing records and preparing waveforms…"));
+            feedback_->setPlainText(tr("Parsing records and preparing waveforms…"));
             run_background(this, [bytes = bytes_, options = used_, confirm] {
                 ParsePreview result;
                 result.parsed = read(bytes->bytes, options);
@@ -480,17 +486,17 @@ private:
                 const auto& suggestions = preview_->suggestions;
                 auto description = diagnostic_text(parsed.diagnostics);
                 if (!has_errors(parsed.diagnostics)) {
-                    QString summary = QStringLiteral("Ready · %1 · %2 channel(s)")
+                    QString summary = tr("Ready · %1 · %2 channel(s)")
                         .arg(as_text(name(parsed.data.source_format))).arg(parsed.data.traces.size());
                     for (std::size_t i = 0; i < parsed.data.traces.size(); ++i) {
                         const auto& trace = parsed.data.traces[i];
-                        summary += '\n' + trace_title(trace, i + 1) + QStringLiteral(" — ") + timing_unit(trace);
+                        summary += '\n' + trace_title(trace, i + 1) + tr(" — ") + timing_unit(trace);
                     }
                     description = summary + (description.isEmpty() ? QString{} : '\n' + description);
                 }
                 apply_suggestions_->setEnabled(applicable(suggestions));
                 for (const auto& evidence : suggestions.evidence)
-                    description += QStringLiteral("\nSuggestion · ") + as_text(evidence);
+                    description += tr("\nSuggestion · ") + as_text(evidence);
                 if (!suggestions.diagnostics.empty())
                     description += '\n' + diagnostic_text(suggestions.diagnostics);
                 feedback_->setPlainText(description);

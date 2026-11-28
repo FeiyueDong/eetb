@@ -1,13 +1,34 @@
 #include "theme.hpp"
 
 #include <QApplication>
+#include <QGuiApplication>
 #include <QPalette>
 #include <QStyleFactory>
+#include <QStyleHints>
 
 namespace gmtools::gui {
 
+namespace {
+void apply_theme_impl(QApplication& app, bool dark);
+}
+
 void apply_theme(QApplication& app) {
-    const bool dark = app.palette().color(QPalette::Window).lightness() < 128;
+    const bool dark = qApp->styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+    apply_theme_impl(app, dark);
+}
+
+void apply_theme(QApplication& app, ThemeMode mode) {
+    bool dark = qApp->styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+    if (mode == ThemeMode::Dark)
+        dark = true;
+    else if (mode == ThemeMode::Light)
+        dark = false;
+    apply_theme_impl(app, dark);
+}
+
+namespace {
+
+void apply_theme_impl(QApplication& app, bool dark) {
     app.setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
     auto palette = app.palette();
     const QColor background(dark ? "#17202d" : "#f3f6fb");
@@ -88,4 +109,5 @@ void apply_theme(QApplication& app) {
     )"));
 }
 
+} // namespace
 } // namespace gmtools::gui
