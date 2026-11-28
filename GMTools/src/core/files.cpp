@@ -247,6 +247,27 @@ bool same_location(const fs::path& left, const fs::path& right) {
 #endif
 }
 
+std::vector<std::size_t> select_channels(const FileData& data, const ChannelSelection& selection,
+                                         std::string_view source, Diagnostics& diagnostics) {
+    std::vector<std::size_t> channels;
+    if (selection.mode == ChannelSelectionMode::All) {
+        channels.reserve(data.traces.size());
+        for (std::size_t i = 0; i < data.traces.size(); ++i)
+            channels.push_back(i + 1);
+        return channels;
+    }
+    for (std::size_t i = 0; i < data.traces.size(); ++i) {
+        if (data.traces[i].quantity == selection.quantity)
+            channels.push_back(i + 1);
+    }
+    if (channels.empty()) {
+        error(diagnostics, std::string{source},
+              "no channel with quantity " + std::string{name(selection.quantity)} + " was found among " +
+                  std::to_string(data.traces.size()) + " channel(s)");
+    }
+    return channels;
+}
+
 std::optional<OutputPlan> plan_outputs(const FileData& data, const fs::path& input,
                                        const ExportOptions& options, Diagnostics& diagnostics) {
     const auto known = formats();
@@ -304,52 +325,72 @@ std::optional<OutputPlan> plan_outputs(const FileData& data, const fs::path& inp
                                           : plan.directory / path_from_utf8(
                                                 stem + "_" + labels[channel - 1] +
                                                 std::string{target_format->extension}));
+    for (std::size_t i = 0; i < plan.targets.size(); ++i) {
+        for (std::size_t j = i + 1; j < plan.targets.size(); ++j) {
+            if (same_location(plan.targets[i], plan.targets[j])) {
+                error(diagnostics, "output",
+                      path_to_utf8(plan.targets[i]) + ": two channels would be written to the same path");
+                return {};
+            }
+        }
+    }
     return plan;
+}
+
+bool validate_target(const fs::path& target, std::span<const fs::path> protected_paths, bool overwrite,
+                     std::span<const fs::path> reserved, Diagnostics& diagnostics,
+                     std::string_view protected_reason) {
+    std::error_code ec;
+    const auto status = fs::symlink_status(target, ec);
+    const bool missing = status.type() == fs::file_type::not_found &&
+                         (!ec || ec == std::errc::no_such_file_or_directory);
+    const auto label = path_to_utf8(target);
+    if (!missing) {
+        if (ec) {
+            error(diagnostics, "output", label + ": " + ec.message());
+            return false;
+        }
+        if (!fs::is_regular_file(status)) {
+            error(diagnostics, "output", label + ": target exists and is not a regular file");
+            return false;
+        }
+    }
+    for (const auto& protected_path : protected_paths) {
+        if (same_location(target, protected_path)) {
+            error(diagnostics, "output", label + ": " + std::string{protected_reason});
+            return false;
+        }
+    }
+    for (const auto& claimed : reserved) {
+        if (same_location(target, claimed)) {
+            error(diagnostics, "output",
+                  label + ": target is also produced by another file in this batch");
+            return false;
+        }
+    }
+    if (!missing && !overwrite) {
+        error(diagnostics, "output", label + ": target already exists; choose a new path or enable overwrite");
+        return false;
+    }
+    return true;
 }
 
 bool validate_targets(const OutputPlan& plan, std::span<const fs::path> protected_paths, bool overwrite,
                       std::span<const fs::path> reserved, Diagnostics& diagnostics,
                       std::string_view protected_reason) {
     for (const auto& target : plan.targets) {
-        std::error_code ec;
-        const auto status = fs::symlink_status(target, ec);
-        const bool missing = status.type() == fs::file_type::not_found &&
-                             (!ec || ec == std::errc::no_such_file_or_directory);
-        const auto label = path_to_utf8(target);
-        if (!missing) {
-            if (ec) {
-                error(diagnostics, "output", label + ": " + ec.message());
-                return false;
-            }
-            if (!fs::is_regular_file(status)) {
-                error(diagnostics, "output", label + ": target exists and is not a regular file");
-                return false;
-            }
-        }
-        for (const auto& protected_path : protected_paths) {
-            if (same_location(target, protected_path)) {
-                error(diagnostics, "output", label + ": " + std::string{protected_reason});
-                return false;
-            }
-        }
-        for (const auto& claimed : reserved) {
-            if (same_location(target, claimed)) {
-                error(diagnostics, "output",
-                      label + ": target is also produced by another file in this batch");
-                return false;
-            }
-        }
-        if (!missing && !overwrite) {
-            error(diagnostics, "output", label + ": target already exists; choose a new path or enable overwrite");
+        if (!validate_target(target, protected_paths, overwrite, reserved, diagnostics, protected_reason))
             return false;
-        }
     }
     return true;
 }
 
 std::vector<fs::path> publish_outputs(const FileData& data, const OutputPlan& plan,
                                       const WriteOptions& writer, bool overwrite,
-                                      Diagnostics& diagnostics, std::string* stage) {
+                                      Diagnostics& diagnostics, std::string* stage,
+                                      std::span<const fs::path> protected_paths,
+                                      std::span<const fs::path> reserved,
+                                      std::string_view protected_reason) {
     std::vector<fs::path> written;
     if (stage)
         *stage = "publish";
@@ -398,7 +439,10 @@ std::vector<fs::path> publish_outputs(const FileData& data, const OutputPlan& pl
         *stage = "publish";
     written.reserve(plan.targets.size());
     for (std::size_t i = 0; i < plan.targets.size(); ++i) {
-        if (!validate_targets(plan, {}, overwrite, {}, diagnostics))
+        // Re-check only the target about to be published: targets written earlier by this
+        // same plan are complete, and re-checking the whole plan would treat them as conflicts.
+        if (!validate_target(plan.targets[i], protected_paths, overwrite, reserved, diagnostics,
+                             protected_reason))
             break;
         ec.clear();
         publish(staged[i], plan.targets[i], overwrite, ec);
@@ -425,7 +469,8 @@ ExportResult export_file(const FileData& data, const fs::path& input, const Expo
     const std::array protected_paths{input};
     if (!detail::validate_targets(*plan, protected_paths, options.overwrite, {}, result.diagnostics))
         return result;
-    result.written = detail::publish_outputs(data, *plan, options.writer, options.overwrite, result.diagnostics);
+    result.written = detail::publish_outputs(data, *plan, options.writer, options.overwrite,
+                                             result.diagnostics, nullptr, protected_paths);
     return result;
 }
 

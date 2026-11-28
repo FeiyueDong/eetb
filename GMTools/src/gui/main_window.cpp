@@ -1,5 +1,6 @@
 #include "main_window.hpp"
 #include "background_task.hpp"
+#include "analysis_dialog.hpp"
 #include "batch_dialog.hpp"
 #include "export_options.hpp"
 #include "override_fields.hpp"
@@ -95,12 +96,16 @@ MainWindow::MainWindow() {
     settings_action_->setShortcut(QKeySequence::Preferences);
     batch_action_ = new QAction(tr("Batch conversion…"), this);
     batch_action_->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
-    addActions({open_action_, reparse_action_, export_action_, settings_action_, batch_action_});
+    analysis_action_ = new QAction(tr("Data analysis…"), this);
+    analysis_action_->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+D")));
+    analysis_action_->setEnabled(false);
+    addActions({open_action_, reparse_action_, export_action_, settings_action_, batch_action_, analysis_action_});
     connect(open_action_, &QAction::triggered, this, &MainWindow::choose_file);
     connect(reparse_action_, &QAction::triggered, this, &MainWindow::reparse);
     connect(export_action_, &QAction::triggered, this, &MainWindow::send_export);
     connect(settings_action_, &QAction::triggered, this, &MainWindow::open_settings);
     connect(batch_action_, &QAction::triggered, this, &MainWindow::open_batch);
+    connect(analysis_action_, &QAction::triggered, this, &MainWindow::open_analysis);
 
     auto* root = new QWidget(this);
     setCentralWidget(root);
@@ -114,6 +119,7 @@ MainWindow::MainWindow() {
     brand->addWidget(label(tr("Ground motion converter"), "muted", root));
     header->addLayout(brand);
     header->addStretch();
+    header->addWidget(action_button(analysis_action_, root));
     header->addWidget(action_button(batch_action_, root));
     header->addWidget(action_button(settings_action_, root));
     header->addWidget(action_button(reparse_action_, root));
@@ -494,6 +500,7 @@ void MainWindow::update_selection() {
 void MainWindow::show_trace(bool scroll) {
     const auto row = channels_->currentRow();
     edit_->setEnabled(!busy_ && row >= 0);
+    analysis_action_->setEnabled(!busy_ && row >= 0);
     properties_->clear();
     metadata_->clear();
     for (std::size_t i = 0; i < trace_plots_.size(); ++i)
@@ -710,6 +717,19 @@ void MainWindow::edit_trace() {
     }
 }
 
+void MainWindow::open_analysis() {
+    if (!parsed_)
+        return;
+    const int row = channels_->currentRow();
+    if (row < 0) {
+        QMessageBox::information(this, tr("Data analysis"), tr("Select a channel first."));
+        return;
+    }
+    auto* dialog = new AnalysisDialog(parsed_, static_cast<std::size_t>(row), this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->show();
+}
+
 void MainWindow::choose_output() {
     const auto directory = QFileDialog::getExistingDirectory(
         this, tr("Choose output folder"),
@@ -890,48 +910,59 @@ void MainWindow::save_preset() {
 }
 
 void MainWindow::apply_preset(const ConversionPreset& preset, bool reopen) {
-    if (!bytes_ && !parsed_) {
+    if (busy_)
+        return;
+    // A preset is a complete write configuration; Auto is not a valid target.
+    bool available = false;
+    for (const auto& info : formats())
+        if (info.id == preset.write.format && info.writable)
+            available = true;
+    if (!available) {
+        QMessageBox::warning(this, tr("Preset not applied"),
+                             tr("The preset target format %1 is not writable in this build.")
+                                 .arg(as_text(name(preset.write.format))));
+        return;
+    }
+    if (!bytes_ || !parsed_) {
         pending_preset_ = preset;
         statusBar()->showMessage(tr("Preset loaded. It will be applied to the next record you open."));
         return;
     }
-    const auto writer_before = writer_;
-    if (preset.write.format != FormatId::Auto) {
-        writer_ = preset.write;
-        if (const auto index = target_->findData(static_cast<int>(preset.write.format)); index >= 0)
-            target_->setCurrentIndex(index);
-    }
-    if (preset.write.output_unit) {
-        if (const auto index = output_unit_->findData(static_cast<int>(*preset.write.output_unit)); index >= 0)
-            output_unit_->setCurrentIndex(index);
-    }
-    if (!preset.name.empty())
-        statusBar()->showMessage(tr("Preset · %1").arg(as_text(preset.name)));
+    // Nothing below may run before the re-parse succeeds: a cancelled dialog or a
+    // parse error leaves the current document, writer and channel selection intact.
     if (reopen) {
-        if (!confirm_replacement()) {
-            writer_ = writer_before;
-            update_format();
+        if (!confirm_replacement())
             return;
-        }
         auto options = preset.read;
         options.extension_hint = last_options_.extension_hint;
         auto parsed = interpret_input(bytes_, input_, options, this);
-        if (!parsed) {
-            writer_ = writer_before;
-            update_format();
+        if (!parsed)
             return;
-        }
         accept_parse(std::move(*parsed));
     }
-    if (parsed_) {
-        for (std::size_t i = 0; i < parsed_->data.traces.size(); ++i) {
-            const bool selected = preset.selection.mode == ChannelSelectionMode::All ||
-                parsed_->data.traces[i].quantity == preset.selection.quantity;
-            if (auto* item = channels_->item(static_cast<int>(i)))
-                item->setCheckState(selected ? Qt::Checked : Qt::Unchecked);
-        }
-        update_selection();
+    writer_ = preset.write;
+    if (const auto index = target_->findData(static_cast<int>(preset.write.format)); index >= 0)
+        target_->setCurrentIndex(index);
+    update_format();
+    if (preset.write.output_unit)
+        output_unit_->setCurrentIndex(std::max(0, output_unit_->findData(static_cast<int>(*preset.write.output_unit))));
+    std::size_t selected = 0;
+    for (std::size_t i = 0; i < parsed_->data.traces.size(); ++i) {
+        const bool checked = preset.selection.mode == ChannelSelectionMode::All ||
+            parsed_->data.traces[i].quantity == preset.selection.quantity;
+        if (checked)
+            ++selected;
+        if (auto* item = channels_->item(static_cast<int>(i)))
+            item->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
     }
+    update_selection();
+    if (preset.selection.mode == ChannelSelectionMode::Quantity && selected == 0) {
+        QMessageBox::warning(this, tr("Preset applied with no channels"),
+                             tr("No channel has quantity %1. Choose channels manually before exporting.")
+                                 .arg(as_text(name(preset.selection.quantity))));
+    }
+    if (!preset.name.empty())
+        statusBar()->showMessage(tr("Preset · %1").arg(as_text(preset.name)));
 }
 
 void MainWindow::set_busy(bool busy, const QString& message) {

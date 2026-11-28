@@ -1,3 +1,5 @@
+#include "core/detail.hpp"
+#include "gmtools/analysis.hpp"
 #include "gmtools/gmtools.hpp"
 
 #include <algorithm>
@@ -37,6 +39,8 @@ void usage(std::ostream& out) {
            "  gmtools convert INPUT --preset FILE -o PATH [options] [--overwrite]\n"
            "  gmtools batch INPUT... --to FORMAT -o DIR [options] [--overwrite]\n"
            "  gmtools batch --input-dir DIR [--filter PATTERN] --to FORMAT -o DIR [options] [--overwrite]\n"
+           "  gmtools analyze INPUT --type stats|intensity|fft|amplitude|fas|psd|response [read options] "
+           "[--channel N] [analysis options] [-o PATH]\n"
            "Run gmtools formats for available targets, including the optional miniSEED 2 target.\n"
            "Read options:\n"
            "  --format auto|text|dat|csv|tsv|at2|vt2|dt2|knet-ascii|sac|mseed|modified-mseed\n"
@@ -61,12 +65,19 @@ void usage(std::ostream& out) {
            "  --select-quantity QUANTITY  export only channels with that physical quantity\n"
            "  --select-all  export every channel (default)\n"
            "  -o/--output DIR must name a directory. --overwrite replaces existing outputs but never a source.\n"
+           "Analysis options:\n"
+           "  --type stats|intensity|fft|amplitude|fas|psd|response selects the analysis\n"
+           "  --integration none|trapezoid|trapezoid-detrend  integrate acceleration for PGV/PGD (intensity)\n"
+           "  --window rectangular|hann|hamming|blackman  --nfft N  --remove-mean | --keep-mean\n"
+           "  --welch  --segment-length N  --overlap FRACTION\n"
+           "  --damping RATIO  --period-min SECONDS  --period-max SECONDS  --period-step SECONDS\n"
+           "  stats and intensity print JSON; spectra require -o PATH for an analysis CSV.\n"
            "Units: g, m/s2, cm/s2 (Gal), nm/s2; m/s, cm/s, mm/s, nm/s; m, cm, mm, nm; counts, unknown.\n"
            "Lines and columns are 1-based. Time columns use seconds.\n"
            "Exit codes: 0 success, 1 conversion/partial failure, 2 invalid arguments, 130 interrupted.\n";
 }
 
-enum class Action { Info, Convert, Batch };
+enum class Action { Info, Convert, Batch, Analyze };
 
 struct Command {
     std::filesystem::path input;
@@ -81,6 +92,17 @@ struct Command {
     std::set<std::string_view> seen;
     bool explicit_format{};
     bool explicit_delimiter{};
+    std::optional<SpectrumKind> spectrum_kind;
+    std::string analysis_type;
+    IntensityOptions intensity;
+    std::optional<std::size_t> nfft;
+    std::optional<WindowType> window;
+    std::optional<bool> remove_mean;
+    bool welch{};
+    std::size_t segment_length{};
+    double overlap{0.5};
+    ResponseSpectrumOptions response;
+    std::optional<std::filesystem::path> analysis_output;
 };
 
 template<class T>
@@ -93,6 +115,7 @@ T require(std::optional<T> value, std::string_view option, std::string_view expe
 Command parse(const Args& args, Action action) {
     const bool convert = action == Action::Convert;
     const bool batch = action == Action::Batch;
+    const bool analyze = action == Action::Analyze;
     const bool writes = convert || batch;
     Command command;
     std::set<std::string_view> seen;
@@ -125,14 +148,24 @@ Command parse(const Args& args, Action action) {
             continue;
         }
         if (option == "--overwrite") {
-            if (!writes)
-                throw std::invalid_argument("--overwrite requires convert or batch");
+            if (!writes && !analyze)
+                throw std::invalid_argument("--overwrite requires convert, batch or analyze");
             command.output.overwrite = true;
             continue;
         }
+        if (option == "--remove-mean" || option == "--keep-mean") {
+            if (!analyze)
+                throw std::invalid_argument(std::string{option} + " requires analyze");
+            command.remove_mean = option == "--remove-mean";
+            continue;
+        }
+        if (option == "--welch") {
+            if (!analyze)
+                throw std::invalid_argument("--welch requires analyze");
+            command.welch = true;
+            continue;
+        }
         if (option == "--select-all") {
-            if (!batch)
-                throw std::invalid_argument("--select-all requires batch");
             command.selection = ChannelSelection{ChannelSelectionMode::All, Quantity::Unknown};
             continue;
         }
@@ -151,7 +184,36 @@ Command parse(const Args& args, Action action) {
             }
             throw std::invalid_argument("invalid value for " + std::string{option});
         };
-        if (option == "--format") {
+        if (analyze && option == "--type") {
+            const auto kind = spectrum_kind_from_name(value);
+            if (!kind && value != "stats" && value != "intensity" && value != "response")
+                throw std::invalid_argument("--type requires stats, intensity, fft, amplitude, fas, psd or response");
+            command.spectrum_kind = kind;
+            command.analysis_type = std::string{value};
+        } else if (analyze && option == "--integration")
+            command.intensity.integration =
+                require(integration_scheme_from_name(value), option, "none, trapezoid or trapezoid-detrend");
+        else if (analyze && option == "--nfft")
+            command.nfft = require(parse_index(value), option, "a positive FFT length");
+        else if (analyze && option == "--window")
+            command.window = require(window_from_name(value), option, "rectangular, hann, hamming or blackman");
+        else if (analyze && option == "--segment-length")
+            command.segment_length = require(parse_index(value), option, "a positive segment length");
+        else if (analyze && option == "--overlap") {
+            command.overlap = require(parse_number(value), option, "a fraction between 0 and 1");
+            if (!(command.overlap >= 0.0 && command.overlap < 1.0))
+                throw std::invalid_argument("--overlap must be between 0 (inclusive) and 1 (exclusive)");
+        } else if (analyze && option == "--damping")
+            command.response.damping_ratio = require(parse_number(value), option, "a non-negative damping ratio");
+        else if (analyze && option == "--period-min")
+            command.response.period_min_seconds = require(parse_number(value), option, "a period in seconds");
+        else if (analyze && option == "--period-max")
+            command.response.period_max_seconds = require(parse_number(value), option, "a period in seconds");
+        else if (analyze && option == "--period-step")
+            command.response.period_step_seconds = require(parse_number(value), option, "a positive period step");
+        else if (analyze && option == "--output")
+            command.analysis_output = path_from_utf8(value);
+        else if (option == "--format") {
             const auto format = require(format_from_name(value), option, "a known input format");
             if (batch && format != FormatId::Auto && !is_generic_text(format)) {
                 const auto known = formats();
@@ -236,8 +298,6 @@ Command parse(const Args& args, Action action) {
                 throw std::invalid_argument("--filter requires a filename pattern");
             command.filter = std::string{value};
         } else if (writes && option == "--select-quantity") {
-            if (!batch)
-                throw std::invalid_argument("--select-quantity requires batch");
             const auto quantity = require(quantity_from_name(value), option, "a known physical quantity");
             if (quantity == Quantity::Unknown)
                 throw std::invalid_argument("--select-quantity requires acceleration, velocity, displacement or counts");
@@ -291,6 +351,39 @@ Command parse(const Args& args, Action action) {
         if (command.output.output.empty() ||
             (!command.preset && command.output.writer.format == FormatId::Auto))
             throw std::invalid_argument("convert requires --to FORMAT and --output PATH");
+        if (command.read.selected_channel &&
+            (seen.contains("--select-all") || seen.contains("--select-quantity")))
+            throw std::invalid_argument("--channel cannot be combined with --select-all or --select-quantity");
+    } else if (action == Action::Analyze) {
+        if (command.input.empty())
+            throw std::invalid_argument("an input file is required");
+        if (command.analysis_type.empty())
+            throw std::invalid_argument("analyze requires --type stats|intensity|fft|amplitude|fas|psd|response");
+        const bool frequency = command.spectrum_kind.has_value();
+        const bool spectral = frequency || command.analysis_type == "response";
+        if (spectral && !command.analysis_output)
+            throw std::invalid_argument("analyze with a spectrum type requires --output PATH");
+        if (!spectral && command.analysis_output)
+            throw std::invalid_argument("analyze with stats or intensity writes JSON to stdout; omit --output");
+        if (seen.contains("--integration") && command.analysis_type != "intensity")
+            throw std::invalid_argument("--integration applies only to --type intensity");
+        if (!frequency && seen.contains("--nfft"))
+            throw std::invalid_argument("--nfft requires a spectrum type");
+        if (!frequency && seen.contains("--window"))
+            throw std::invalid_argument("--window requires a spectrum type");
+        if (!frequency && (seen.contains("--welch") || seen.contains("--segment-length") || seen.contains("--overlap")))
+            throw std::invalid_argument("--welch, --segment-length and --overlap require a spectrum type");
+        if (command.spectrum_kind != SpectrumKind::Psd && !command.welch &&
+            (seen.contains("--segment-length") || seen.contains("--overlap")))
+            throw std::invalid_argument("--segment-length and --overlap require --welch or --type psd");
+        if (seen.contains("--welch") && !frequency)
+            throw std::invalid_argument("--welch requires a spectrum type");
+        if (command.spectrum_kind && *command.spectrum_kind == SpectrumKind::Psd)
+            command.welch = true;
+        if (command.analysis_type != "response" &&
+            (seen.contains("--damping") || seen.contains("--period-min") || seen.contains("--period-max") ||
+             seen.contains("--period-step")))
+            throw std::invalid_argument("--damping and the --period-* options require --type response");
     } else if (command.input.empty()) {
         throw std::invalid_argument("an input file is required");
     }
@@ -571,6 +664,79 @@ int run_batch(Command& command) {
     return (summary.failed || summary.partial || summary.cancelled) ? 1 : 0;
 }
 
+
+int run_analyze(Command& command, const FileData& data, const std::filesystem::path& input) {
+    const Trace* selected = nullptr;
+    if (data.traces.size() == 1) {
+        selected = &data.traces.front();
+    } else if (command.read.selected_channel && *command.read.selected_channel >= 1 &&
+               *command.read.selected_channel <= data.traces.size()) {
+        selected = &data.traces[*command.read.selected_channel - 1];
+    }
+    if (!selected) {
+        std::cerr << "gmtools: the file contains " << data.traces.size()
+                  << " channels; select one with --channel N\n";
+        return 2;
+    }
+    const Trace& trace = *selected;
+    Diagnostics diagnostics;
+    std::string text;
+    if (command.analysis_type == "stats") {
+        const Statistics statistics = calculate_statistics(trace, diagnostics);
+        for (const auto& diagnostic : diagnostics)
+            std::cerr << describe(diagnostic) << '\n';
+        if (has_errors(diagnostics))
+            return 1;
+        std::cout << statistics_json(trace, statistics);
+        return 0;
+    }
+    if (command.analysis_type == "intensity") {
+        const IntensityMeasures measures = calculate_intensity(trace, command.intensity, diagnostics);
+        for (const auto& diagnostic : diagnostics)
+            std::cerr << describe(diagnostic) << '\n';
+        if (has_errors(diagnostics) || !measures.available)
+            return 1;
+        std::cout << intensity_json(trace, measures);
+        return 0;
+    }
+    if (command.analysis_type == "response") {
+        ResponseSpectrumOptions options = command.response;
+        options.stop = [] { return stop_requested.load(); };
+        const ResponseSpectrum spectrum = calculate_response_spectrum(trace, options, diagnostics);
+        for (const auto& diagnostic : diagnostics)
+            std::cerr << describe(diagnostic) << '\n';
+        if (has_errors(diagnostics) || !spectrum.available)
+            return 1;
+        text = response_spectrum_csv(trace, spectrum);
+    } else {
+        SpectrumOptions options;
+        options.kind = *command.spectrum_kind;
+        options.nfft = command.nfft;
+        options.window = command.window.value_or(command.welch ? WindowType::Hann : WindowType::Rectangular);
+        options.remove_mean = command.remove_mean;
+        options.welch = command.welch;
+        options.segment_length = command.segment_length;
+        options.overlap_fraction = command.overlap;
+        if (command.welch && command.nfft)
+            options.fft_length = *command.nfft;
+        options.stop = [] { return stop_requested.load(); };
+        const Spectrum spectrum = calculate_spectrum(trace, options, diagnostics);
+        for (const auto& diagnostic : diagnostics)
+            std::cerr << describe(diagnostic) << '\n';
+        if (has_errors(diagnostics) || !spectrum.available)
+            return 1;
+        text = spectrum_csv(trace, spectrum);
+    }
+    Diagnostics write_diagnostics;
+    detail::save_text_file(*command.analysis_output, text, command.output.overwrite, input, write_diagnostics);
+    for (const auto& diagnostic : write_diagnostics)
+        std::cerr << describe(diagnostic) << '\n';
+    if (has_errors(write_diagnostics))
+        return 1;
+    std::cout << path_to_utf8(*command.analysis_output) << '\n';
+    return 0;
+}
+
 int run(const Args& args) {
     std::cout.imbue(std::locale::classic());
     std::cout << std::setprecision(std::numeric_limits<double>::max_digits10);
@@ -586,13 +752,14 @@ int run(const Args& args) {
         }
         return 0;
     }
-    if (action_name != "info" && action_name != "convert" && action_name != "batch") {
+    if (action_name != "info" && action_name != "convert" && action_name != "batch" && action_name != "analyze") {
         usage(std::cerr);
         return 2;
     }
-    const Action action = action_name == "info" ? Action::Info
-                         : action_name == "convert" ? Action::Convert
-                                                    : Action::Batch;
+    const Action action = action_name == "info"      ? Action::Info
+                         : action_name == "convert"  ? Action::Convert
+                         : action_name == "analyze"  ? Action::Analyze
+                                                     : Action::Batch;
     auto command = parse(args, action);
     if (action == Action::Batch)
         return run_batch(command);
@@ -615,6 +782,8 @@ int run(const Args& args) {
         command.read.selected_channel = selected;
         command.read.extension_hint = path_to_utf8(command.input.extension());
         command.output.writer = loaded.preset.write;
+        if (!command.selection)
+            command.selection = loaded.preset.selection;
     }
     if (command.profile) {
         const auto profile = load_profile(*command.profile);
@@ -643,6 +812,19 @@ int run(const Args& args) {
     if (action == Action::Info) {
         print_info(parsed, command.read.selected_channel);
         return 0;
+    }
+    if (action == Action::Analyze)
+        return run_analyze(command, parsed.data, command.input);
+    if (command.selection && command.selection->mode == ChannelSelectionMode::Quantity) {
+        Diagnostics selection_diagnostics;
+        const auto source = path_to_utf8(command.input);
+        const auto channels =
+            detail::select_channels(parsed.data, *command.selection, source, selection_diagnostics);
+        for (const auto& diagnostic : selection_diagnostics)
+            std::cerr << describe(diagnostic) << '\n';
+        if (has_errors(selection_diagnostics))
+            return 1;
+        command.output.channels = channels;
     }
     const auto output = export_file(parsed.data, command.input, command.output);
     print_diagnostics(output.diagnostics, command.input);

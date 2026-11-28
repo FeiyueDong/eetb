@@ -132,24 +132,16 @@ BatchResult convert_batch(const BatchOptions& options, const BatchProgress& prog
         }
 
         file.stage = "select";
-        std::vector<std::size_t> channels;
-        if (options.preset.selection.mode == ChannelSelectionMode::Quantity) {
-            const auto wanted = options.preset.selection.quantity;
-            for (std::size_t i = 0; i < parsed.data.traces.size(); ++i) {
-                if (parsed.data.traces[i].quantity == wanted)
-                    channels.push_back(i + 1);
-            }
-            if (channels.empty()) {
-                detail::error(file.diagnostics, "batch",
-                              "no channel with quantity " + std::string{name(wanted)} + " was found among " +
-                                  std::to_string(parsed.data.traces.size()) + " channel(s)");
-                file.state = BatchFileState::Failed;
-                summarize(result);
-                notify(progress, result);
-                continue;
-            }
+        const auto source = path_to_utf8(file.input);
+        const auto channels =
+            detail::select_channels(parsed.data, options.preset.selection, source, file.diagnostics);
+        if (has_errors(file.diagnostics)) {
+            file.state = BatchFileState::Failed;
+            summarize(result);
+            notify(progress, result);
+            continue;
         }
-        file.channels_selected = channels.empty() ? parsed.data.traces.size() : channels.size();
+        file.channels_selected = channels.size();
 
         file.stage = "plan";
         notify(progress, result);
@@ -175,10 +167,12 @@ BatchResult convert_batch(const BatchOptions& options, const BatchProgress& prog
             notify(progress, result);
             continue;
         }
-        reserved.insert(reserved.end(), plan->targets.begin(), plan->targets.end());
-
         file.written = detail::publish_outputs(parsed.data, *plan, options.preset.write, options.overwrite,
-                                               file.diagnostics, &file.stage);
+                                               file.diagnostics, &file.stage, originals, reserved,
+                                               "target refers to a source file of this batch");
+        // Only paths that actually appeared stay claimed: a plan that failed before publishing
+        // must not block a later file from using the same names.
+        reserved.insert(reserved.end(), file.written.begin(), file.written.end());
         file.state = has_errors(file.diagnostics)
                          ? (file.written.empty() ? BatchFileState::Failed : BatchFileState::Partial)
                          : BatchFileState::Succeeded;

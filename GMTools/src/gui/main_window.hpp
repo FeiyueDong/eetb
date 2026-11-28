@@ -44,6 +44,7 @@ private:
     void update_selection();
     void update_format();
     void edit_trace();
+    void open_analysis();
     void choose_output();
     void send_export();
     void open_settings();
@@ -67,6 +68,7 @@ private:
     QAction* export_action_{};
     QAction* settings_action_{};
     QAction* batch_action_{};
+    QAction* analysis_action_{};
     QStackedWidget* workspace_{};
     QSplitter* panes_{};
     QLabel* source_label_{};

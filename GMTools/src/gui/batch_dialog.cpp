@@ -8,6 +8,7 @@
 
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QKeyEvent>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDragEnterEvent>
@@ -572,6 +573,7 @@ void BatchDialog::start() {
 
     stop_flag_ = std::make_shared<std::atomic<bool>>(false);
     states_.assign(inputs_.size(), BatchFileState::Pending);
+    shown_states_.assign(inputs_.size(), BatchFileState::Pending);
     for (int row = 0; row < table_->rowCount(); ++row) {
         table_->item(row, 1)->setText(state_text(BatchFileState::Pending));
         table_->item(row, 2)->setText(QString{});
@@ -623,12 +625,17 @@ void BatchDialog::show_progress(const BatchResult& result) {
     std::size_t done = 0;
     for (std::size_t i = 0; i < result.files.size() && i < static_cast<std::size_t>(table_->rowCount()); ++i) {
         const auto& file = result.files[i];
+        const bool changed = i >= shown_states_.size() || shown_states_[i] != file.state;
         states_[i] = file.state;
-        table_->item(static_cast<int>(i), 1)->setText(state_text(file.state));
+        if (changed) {
+            if (i < shown_states_.size())
+                shown_states_[i] = file.state;
+            table_->item(static_cast<int>(i), 1)->setText(state_text(file.state));
+        }
         const auto failure = failure_text(file);
-        if (!failure.isEmpty())
+        if (changed && !failure.isEmpty())
             table_->item(static_cast<int>(i), 2)->setText(failure);
-        else if (!file.written.empty())
+        else if (changed && !file.written.empty())
             table_->item(static_cast<int>(i), 2)->setText(
                 tr("%1 file(s) written").arg(file.written.size()));
         if (file.state != BatchFileState::Pending && file.state != BatchFileState::Running)
@@ -646,6 +653,15 @@ void BatchDialog::finished(const BatchResult& result) {
     set_running(false);
     show_progress(result);
     const auto& summary = result.summary;
+    if (has_errors(result.diagnostics)) {
+        // A batch-level problem stopped the run before any file was read: report
+        // it as "not started", not as a finished batch with zero failures.
+        status_->setText(tr("Batch was not started."));
+        summary_->setText(tr("Not started · %1 problem(s)").arg(result.diagnostics.size()));
+        details_->setPlainText(diagnostic_text(result.diagnostics).trimmed());
+        details_->setVisible(true);
+        return;
+    }
     summary_->setText(tr("%1 succeeded · %2 partial · %3 failed · %4 cancelled · %5 file(s) written")
                           .arg(summary.succeeded)
                           .arg(summary.partial)
@@ -662,6 +678,14 @@ void BatchDialog::finished(const BatchResult& result) {
     details_->setPlainText(text.trimmed());
     details_->setVisible(!text.trimmed().isEmpty());
     status_->setText(summary.stopped ? tr("Stopped after the current file.") : tr("Batch finished."));
+}
+
+void BatchDialog::keyPressEvent(QKeyEvent* event) {
+    if (running_ && event->key() == Qt::Key_Escape) {
+        request_stop();
+        return;
+    }
+    QDialog::keyPressEvent(event);
 }
 
 void BatchDialog::dragEnterEvent(QDragEnterEvent* event) {

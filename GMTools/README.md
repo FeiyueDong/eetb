@@ -4,7 +4,7 @@ GMTools 将一个文件中的地震动记录读成独立通道。可以检查样
 
 ## 构建
 
-需要支持 C++20 的编译器和 xmake 3.0 或更新版本。nlohmann/json 3.10 或更新的 3.x 版本由 xmake 查找或安装。构建 GUI 还需要已安装的 Qt 6.2 或更新的 6.x SDK，包含 Widgets 和 Concurrent 模块。
+需要支持 C++20 的编译器和 xmake 3.0 或更新版本。nlohmann/json 3.10 或更新的 3.x 版本由 xmake 查找或安装。频谱与反应谱使用 Eigen 3.3 或更新的 3.x 版本（xmake 以系统包查找，需可被 pkg-config 或 include 路径发现）。构建 GUI 还需要已安装的 Qt 6.2 或更新的 6.x SDK，包含 Widgets 和 Concurrent 模块。
 
 完整构建包含 CLI、Qt GUI 和标准 miniSEED。安装匹配的 Qt SDK、libmseed 并确保可找到 `mseed.pc` 后，在 `GMTools/` 目录执行：
 
@@ -95,6 +95,21 @@ xmake run gmtools convert /path/to/station.NS --format knet-ascii --to at2 -o ou
 # 显式指定输出单位，选择第二条通道
 xmake run gmtools convert channels.csv --channel 2 --input-unit g --output-unit m/s2 \
   --to txt -o selected.txt
+
+# 时域统计以 JSON 输出到标准输出
+xmake run gmtools analyze record.at2 --type stats
+
+# 工程强度指标，使用“梯形积分并线性去趋势”
+xmake run gmtools analyze record.at2 --type intensity --integration trapezoid-detrend
+
+# 单边幅值谱与 Welch 功率谱密度写入 CSV
+xmake run gmtools analyze record.at2 --type amplitude -o out/amplitude.csv
+xmake run gmtools analyze record.at2 --type psd --segment-length 2048 --overlap 0.5 \
+  -o out/psd.csv
+
+# 5% 阻尼反应谱，周期 0–5 s，步长 0.02 s
+xmake run gmtools analyze record.at2 --channel 1 --type response --damping 0.05 \
+  --period-min 0 --period-max 5 --period-step 0.02 -o out/response.csv
 ```
 
 行号、列号和通道编号都从 1 开始。首末行均包含在数据范围内。`--dt` 和 `--fs` 互斥。`--input-unit` 解释或覆盖输入单位，保留现有样本值。`--output-unit` 在同一物理量内换算，重力加速度采用 `1 g = 9.80665 m/s² = 980.665 cm/s²`。已知单位、采样间隔或物理量被覆盖时可以在诊断及来源字段中查看相应记录。`--numeric-factor` 明确指定样本缩放，与解释输入单位及导出单位换算分别处理。
@@ -237,6 +252,21 @@ xmake run gmtools batch one.at2 two.dat three.csv -o out/batch --to csv
 
 `Ctrl+C`（`SIGINT`）在完成当前文件并发布结果后停止，尚未开始的文件标记为已取消，退出码为 `130`。全部成功为 `0`；任一失败、部分成功或取消为非零；参数或公共配置错误为 `2`。进度按文件输出终态，每个文件保留失败阶段、选中通道数、实际写出路径与诊断原文。
 
+## 地震动分析
+
+`analyze` 与 GUI 的数据分析窗口只读当前记录的一条通道，不修改样本、单位、处理历史或导出勾选。统计与峰值在原始数值上计算；强度、积分与反应谱在临时 SI 副本上计算，通道本身保持不变。
+
+- **时域统计**：样本数、采样间隔与频率、时程长度、极小值、极大值、绝对峰值、带符号峰值、峰值点与峰值时刻、均值、总体标准差、RMS。峰值并列时取首次出现；缺少有效采样间隔时不给出峰值时刻与时程长度。
+- **强度指标**：PGA、CAV、Arias 强度 `IA = π/(2g₀)·∫a²dt`（`g₀ = 9.80665 m/s²`），以及 5–75% 与 5–95% 显著持时（沿累积能量线性插值）。积分方案 `none` 只取当前物理量峰值；`trapezoid` 以零初值做梯形积分；`trapezoid-detrend` 在每级积分后做线性去趋势再进入下一级。积分得到的峰值标记为估计值。
+- **频谱**：FFT 模值、单边幅值谱、FAS 与 Welch 功率谱密度。幅值谱对 DC 与偶数长度的 Nyquist 点不折叠，其余单边频点乘 2；`FAS = dt·|X|`；PSD 使用对称窗并按窗能量与分段数归一化。默认矩形窗、不去均值、FFT 长度等于样本数；补零只细化频率采样，不缩短记录。
+- **反应谱**：用零阶保持（FOH）递推解单位质量单自由度振子，输出 `Sd`、`Sv`、真实绝对加速度 `Sa`、`PSV = ωSd` 与 `PSA = ω²Sd`。默认 5% 阻尼、周期 0–5 s、步长 0.02 s；峰值取在输入采样边界（含初始状态）。
+
+频谱与反应谱要求已知且为正的采样间隔；强度与积分还要求物理量为加速度且单位可换算到 SI；计数（counts）不会被隐式标定或当作加速度。参数、窗、分段与归一化方式都写入导出结果的 JSON 头，便于复核。
+
+计算限制：FFT 长度上限 `2^24`，Welch 分段数上限 `100000`，反应谱周期点上限 `100000`；超出限制或窗能量为零时报错，不会静默降采样或修改参数。补零只改变频率采样密度，不提高真实频率分辨率。
+
+`--type` 取 `stats`、`intensity`、`fft`、`amplitude`、`fas`、`psd`、`response`。`stats` 与 `intensity` 默认把 JSON 写到标准输出；频谱与反应谱必须用 `-o` 指定 CSV，已有目标需 `--overwrite`。CSV 首行为 `# GMTools analysis 1`，次行为记录通道、物理量、单位、窗、分段、FFT 长度与方法的注释行；按 `#` 跳过注释即可用任意表格程序读取。计算始终使用完整样本，界面上的抽稀只影响显示。
+
 ## GUI
 
 1. 点击 **Open file**、按 `Ctrl+O` 或拖入单个文件。解析窗口支持自动识别或手动选格式。
@@ -247,7 +277,9 @@ xmake run gmtools batch one.at2 two.dat three.csv -o out/batch --to csv
 
 6. **Settings** 调整语言、主题和记忆选项，**Batch conversion**（`Ctrl+B`）打开批量窗口。批量窗口显示文件表、预设、输入参数、通道筛选、输出目录与覆盖开关；**Add files / Add directory** 去重后加入列表，目录按文件名模式筛选且默认不递归；也可以把多个文件或目录拖入批量窗口。开始前会确认文件数、输出目录与命名规则。运行期间只能停止或关闭详情，关闭请求走安全停止；结束后列出每个文件的状态、写出数量与诊断，并可打开输出目录。
 
-读取、解析、波形概览计算、批量与导出在后台执行；执行期间显示忙碌指示，禁止替换记录、编辑及关闭正在工作的窗口。打开新文件或重新解释文件时会重置覆盖开关，有未全部导出的通道编辑时会提示。窗口尺寸、面板比例及最近使用目录保存在本机 Qt 设置中。界面按启动时的系统配色选择浅色或深色主题。
+7. 选中通道后点击 **Data analysis**（`Ctrl+Shift+D`）打开分析窗口。窗口内可在同一记录的通道之间切换，**Time history / Spectrum / Response spectrum / Engineering parameters** 四页分别显示时程与峰值、频谱参数与结果、反应谱参数与五类谱、统计与强度指标。频谱和反应谱按需计算并在后台执行，运行期间不能关闭窗口；曲线支持滚轮缩放、左键拖动平移、双击恢复全范围，光标显示最近点的坐标。**Export data** 写出与屏幕抽稀无关的完整 CSV/JSON，**Save image** 保存当前图的 PNG。分析不会改变通道样本、单位或导出勾选。
+
+读取、解析、波形概览计算、批量、分析与导出在后台执行；执行期间显示忙碌指示，禁止替换记录、编辑及关闭正在工作的窗口。打开新文件或重新解释文件时会重置覆盖开关，有未全部导出的通道编辑时会提示。窗口尺寸、面板比例及最近使用目录保存在本机 Qt 设置中。界面按启动时的系统配色选择浅色或深色主题。
 
 模块职责、此次整理的问题及人工检查项目见[架构与界面整理记录](docs/log/ARCHITECTURE_AND_UI_REVIEW.md)。
 
@@ -260,6 +292,8 @@ xmake run gmtools batch one.at2 two.dat three.csv -o out/batch --to csv
 第三阶段的运行证据、样本来源与待验收范围见[第三阶段验收记录](docs/validation/GMTOOLS_PHASE3_RESULTS.md)。实施范围见[第三阶段开发文档](docs/5.GMTOOLS_PHASE3_DEVELOPMENT.md)。
 
 第四阶段加入界面国际化、程序设置、转换预设与顺序批量转换。实施范围见[第四阶段开发文档](docs/6.GMTOOLS_PHASE4_DEVELOPMENT.md)，当前构建、运行与未完成项见[第四阶段验收记录](docs/validation/GMTOOLS_PHASE4_RESULTS.md)。
+
+第五阶段加入时域统计、强度指标、频谱与反应谱，以及 GUI 数据分析窗口和 `analyze` 命令；同时修复多通道发布、通道筛选、预设事务化等遗留问题。实施范围见[第五阶段开发文档](docs/7.GMTOOLS_PHASE5_DEVELOPMENT.md)，当前构建、运行与未完成项见[第五阶段验收记录](docs/validation/GMTOOLS_PHASE5_RESULTS.md)，算法来源与许可见[分析算法来源](docs/analysis_sources.md)。
 
 ### 本地复核
 
@@ -274,4 +308,4 @@ python3 scripts/verify_core_formats.py --gmtools build/linux/x86_64/release/gmto
 
 ### 示例数据来源
 
-`example/` 中的四份波形由用户提供，首次入库于 `ce14599`。Helena 头段署名 PEER NGA，Trinidad 头段署名 PEER Strong Motion Database。台湾 SAC 的头段标识为 TW.5AFCD.00.HNZ，花莲 miniSEED 为 CB.TAPBA 的 28 个通道，这两份文件的提供机构待确认。仓库中未找到四份原件的下载日期、原始下载链接或再分发授权。对外分发前应由数据提供者确认授权范围。武汉与 PEER VT2/DT2 外部样本按本地提供的文件复核。Modified 解码器移植自 REST data，其 MIT 许可适用于相应代码。[示例摘要与哈希](docs/validation/GMTOOLS_PHASE1_RESULTS.md#样本清单) · [外部样本和代码版本](docs/validation/GMTOOLS_PHASE3_RESULTS.md#可复核的样本与数值) · [REST data 许可](licenses/REST-data-MIT.txt)
+`example/` 中的四份波形由用户提供，首次入库于 `ce14599`。Helena 头段署名 PEER NGA，Trinidad 头段署名 PEER Strong Motion Database。台湾 SAC 的头段标识为 TW.5AFCD.00.HNZ，花莲 miniSEED 为 CB.TAPBA 的 28 个通道，这两份文件的提供机构待确认。仓库中未找到四份原件的下载日期、原始下载链接或再分发授权。对外分发前应由数据提供者确认授权范围。武汉与 PEER VT2/DT2 外部样本按本地提供的文件复核。Modified 解码器移植自 REST data，其 MIT 许可适用于相应代码。第五阶段的分析算法参考 REST 与 MSL 的公开实现后重新编写，未复制其代码；来源提交、参考文件与许可结论见[分析算法来源](docs/analysis_sources.md)。[示例摘要与哈希](docs/validation/GMTOOLS_PHASE1_RESULTS.md#样本清单) · [外部样本和代码版本](docs/validation/GMTOOLS_PHASE3_RESULTS.md#可复核的样本与数值) · [REST data 许可](licenses/REST-data-MIT.txt)

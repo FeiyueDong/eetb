@@ -75,11 +75,16 @@ if has_config("enable_mseed") then
     add_requires("libmseed >=3.5.3 <4.0.0", {system = true, configs = {sdk = sdk}})
 end
 
+add_requires("eigen >=3.3", {system = true})
+
 target("gmtools_core")
     set_kind("static")
     set_default(false)
     add_includedirs("include", {public = true})
-    add_packages("nlohmann_json")
+    add_includedirs("src", {public = false})
+    add_packages("nlohmann_json", "eigen")
+    add_files("src/analysis/statistics.cpp", "src/analysis/intensity.cpp", "src/analysis/spectrum.cpp",
+              "src/analysis/response_spectrum.cpp", "src/analysis/result_io.cpp")
     add_files("src/core/data.cpp", "src/core/metadata.cpp", "src/core/files.cpp", "src/core/profile.cpp",
               "src/core/preset.cpp", "src/core/batch.cpp",
               "src/formats/registry.cpp", "src/formats/text.cpp", "src/formats/text_provenance.cpp", "src/formats/peer.cpp",
@@ -98,6 +103,7 @@ target("gmtools")
     set_kind("binary")
     set_rundir("$(projectdir)")
     add_deps("gmtools_core")
+    add_includedirs("src", {public = false})
     add_files("src/cli/main.cpp")
     if is_plat("mingw") then
         add_ldflags("-municode")
@@ -109,11 +115,13 @@ if has_config("build_gui") then
         add_rules("qt.widgetapp")
         set_rundir("$(projectdir)")
         add_deps("gmtools_core")
+        add_includedirs("src", {public = false})
         add_frameworks("QtConcurrent")
         add_files("src/gui/main.cpp", "src/gui/export_options.cpp", "src/gui/main_window.cpp", "src/gui/parse_dialog.cpp",
                   "src/gui/plot.cpp", "src/gui/theme.cpp", "src/gui/ui_helpers.cpp",
                   "src/gui/localization.cpp", "src/gui/settings.cpp", "src/gui/settings_dialog.cpp",
-                  "src/gui/preset_store.cpp", "src/gui/preset_dialog.cpp", "src/gui/batch_dialog.cpp")
+                  "src/gui/preset_store.cpp", "src/gui/preset_dialog.cpp", "src/gui/batch_dialog.cpp",
+                  "src/gui/analysis_plot.cpp", "src/gui/analysis_dialog.cpp")
         add_files("src/gui/*.hpp")
         after_build(function (target)
             import("lib.detect.find_program")
@@ -132,6 +140,18 @@ if has_config("build_gui") then
             assert(os.isfile(ts), "translations/gmtools_zh_CN.ts is missing")
             os.mkdir(outdir)
             os.execv(lrelease, {ts, "-qm", qm})
+        end)
+        on_install(function (target)
+            -- The GUI locates translations next to the executable, so the
+            -- compiled catalogue must be installed into bin/translations.
+            local qm = path.join(target:targetdir(), "translations", "gmtools_zh_CN.qm")
+            assert(os.isfile(qm), "translations/gmtools_zh_CN.qm is missing; build the GUI first")
+            local bin = path.join(target:installdir(), "bin")
+            os.mkdir(bin)
+            os.cp(target:targetfile(), bin)
+            local dest = path.join(bin, "translations")
+            os.mkdir(dest)
+            os.cp(qm, dest)
         end)
         on_config(function (target)
             import("core.base.semver")

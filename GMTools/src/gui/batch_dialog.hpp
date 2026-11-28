@@ -6,6 +6,7 @@
 #include <QDialog>
 
 #include <atomic>
+#include <vector>
 #include <memory>
 
 class QCheckBox;
@@ -29,6 +30,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 
@@ -58,6 +60,7 @@ private:
     bool writer_touched_{};
     std::shared_ptr<std::atomic<bool>> stop_flag_;
     std::vector<BatchFileState> states_;
+    std::vector<BatchFileState> shown_states_;
 
     QTableWidget* table_{};
     QComboBox* preset_{};

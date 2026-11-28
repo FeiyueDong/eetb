@@ -65,7 +65,17 @@ struct OutputPlan {
 
 std::optional<OutputPlan> plan_outputs(const FileData& data, const std::filesystem::path& input,
                                        const ExportOptions& options, Diagnostics& diagnostics);
+
+// 1-based indices selected by a preset/CLI rule. An empty result is always an
+// error: "all channels" is expressed as ChannelSelectionMode::All, never as an
+// empty list handed to export_file().
+std::vector<std::size_t> select_channels(const FileData& data, const ChannelSelection& selection,
+                                         std::string_view source, Diagnostics& diagnostics);
 bool same_location(const std::filesystem::path& left, const std::filesystem::path& right);
+bool validate_target(const std::filesystem::path& target,
+                     std::span<const std::filesystem::path> protected_paths, bool overwrite,
+                     std::span<const std::filesystem::path> reserved, Diagnostics& diagnostics,
+                     std::string_view protected_reason = "target refers to the input file");
 bool validate_targets(const OutputPlan& plan, std::span<const std::filesystem::path> protected_paths,
                       bool overwrite, std::span<const std::filesystem::path> reserved,
                       Diagnostics& diagnostics,
@@ -73,6 +83,9 @@ bool validate_targets(const OutputPlan& plan, std::span<const std::filesystem::p
 std::vector<std::filesystem::path> publish_outputs(const FileData& data, const OutputPlan& plan,
                                                    const WriteOptions& writer, bool overwrite,
                                                    Diagnostics& diagnostics,
-                                                   std::string* stage = nullptr);
+                                                   std::string* stage = nullptr,
+                                                   std::span<const std::filesystem::path> protected_paths = {},
+                                                   std::span<const std::filesystem::path> reserved = {},
+                                                   std::string_view protected_reason = "target refers to the input file");
 
 } // namespace gmtools::detail
